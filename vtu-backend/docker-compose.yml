@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vtu
+      POSTGRES_PASSWORD: vtu_dev_password
+      POSTGRES_DB: vtu_ledger
+    ports: ["5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vtu -d vtu_ledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:            # job queue for the OCR worker (used from step 5)
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build: .
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+    ports: ["8001:8000"]
+    volumes: ["./app:/srv/app", "./alembic:/srv/alembic", "./scripts:/srv/scripts", "./tests:/srv/tests"]
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  pgdata:

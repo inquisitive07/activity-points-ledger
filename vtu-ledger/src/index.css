@@ -1,0 +1,4 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+body { @apply bg-blush text-ink antialiased; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }

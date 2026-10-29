@@ -1,0 +1,19 @@
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.routers import auth, students
+
+app = FastAPI(title="VTU Activity Points Ledger API")
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:3000"],
+                   allow_methods=["*"], allow_headers=["*"])
+app.include_router(auth.router)
+app.include_router(students.router)
+
+
+@app.get("/health")
+def health(db: Session = Depends(get_db)):
+    db.execute(text("SELECT 1"))
+    return {"status": "ok"}
