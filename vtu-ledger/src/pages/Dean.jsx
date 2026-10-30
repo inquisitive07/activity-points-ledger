@@ -120,7 +120,7 @@ export function ClubMatrix() {
 }
 
 /* ---------- Student batch import with live validation ---------- */
-const SAMPLE = 'usn,name,dept,type,email\n1VT23CS041,Anika Menon,CS,REGULAR,anika@vtu.edu.in\n1VT23EC,Bad Row,XX,LATERAL,not-an-email\n1VT22CS001,Aarav Sharma,CS,REGULAR,aarav@vtu.edu.in';
+const SAMPLE = 'usn,name,dept,type,email\n1RV23CS041,Anika Menon,CS,REGULAR,anika@vtu.edu.in\n1RV23EC,Bad Row,XX,LATERAL,not-an-email\n1RV22CS001,Aarav Sharma,CS,REGULAR,aarav@vtu.edu.in';
 export function StudentImport() {
   const { students, setStudents, log, toast } = useApp();
   const [text, setText] = useState('');
@@ -133,9 +133,9 @@ export function StudentImport() {
     }
     return data.map((r, i) => {
       const errors = [];
-      if (!/^1VT\d{2}[A-Z]{2}\d{3}$/.test(r.usn || '')) errors.push('Invalid USN');
+      if (!/^1RV\d{2}[A-Z]{2}\d{3}$/.test(r.usn || '')) errors.push('Invalid USN');
       if (!r.name) errors.push('Name required');
-      if (!['CS', 'EC', 'ME', 'CV'].includes(r.dept)) errors.push('Unknown dept');
+      if (!['IS', 'CS', 'CY', 'CD', 'AI', 'EC', 'EI', 'ME', 'CV'].includes(r.dept)) errors.push('Unknown dept');
       if (!POINT_REQUIREMENT[r.type]) errors.push('Type must be REGULAR/LATERAL');
       if (!/^\S+@\S+\.\S+$/.test(r.email || '')) errors.push('Invalid email');
       if (students.some((s) => s.usn === r.usn)) errors.push('Duplicate USN');

@@ -9,7 +9,7 @@ export default function Layout({ children }) {
   return (
     <div className="min-h-screen flex flex-col">
       <header className="bg-maroon text-white flex items-center justify-between px-4 py-3">
-        <div className="font-bold">VTU Activity Points Ledger</div>
+        <div className="font-bold">RVCE Activity Points Ledger</div>
         <div className="flex items-center gap-3 text-sm">
           <span className="hidden sm:inline">{user.name}</span>
           <span className="px-2 py-0.5 rounded-full bg-rosered text-xs font-semibold">{user.role}</span>

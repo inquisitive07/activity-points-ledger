@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.routers import auth, claims, events, students
 
-app = FastAPI(title="VTU Activity Points Ledger API")
+app = FastAPI(title="RVCE Activity Points Ledger API")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:3000"],
                    allow_methods=["*"], allow_headers=["*"])
 app.include_router(auth.router)

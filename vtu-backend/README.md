@@ -1,4 +1,4 @@
-# VTU Activity Points Ledger — Backend
+# RVCE Activity Points Ledger — Backend
 
 Stack: FastAPI · SQLAlchemy 2 · Alembic · PostgreSQL 16 · PaddleOCR (Docker Compose).
 Uploaded files use private local storage (a Docker volume); S3-compatible object storage is a later phase.
@@ -25,25 +25,34 @@ Volumes: `pgdata` (database files), `storage` (uploaded files), `paddle_models` 
 ### Demo accounts — LOCAL DEVELOPMENT / DEMO ONLY
 Created by `scripts/seed.py` for the local Docker database. Every account uses the password **`vtu@123`** (stored
 only as a bcrypt hash, with a separate salt per account). Never seed these accounts into a shared or production
-database.
+database. The `@vtu.edu.in` login emails (and the students' contact emails) are fictional development/demo
+values; they are kept unchanged because the append-only audit history references the login emails.
+
+Demo USNs are fictional and follow the RVCE format `1RV` + joining year (YY) + department code (DD) + serial (NNN),
+e.g. `1RV24IS063`.
 
 | Email | Role | Linked to |
 |---|---|---|
-| `student@vtu.edu.in` | STUDENT | 1VT22CS001 Aarav Sharma (CSE) |
-| `student2@vtu.edu.in` | STUDENT | 1VT22CS014 Diya Nair (CSE) — has reached the 100-point target |
-| `student3@vtu.edu.in` | STUDENT | 1VT22EC008 Ishita Rao (ECE) |
-| `student4@vtu.edu.in` | STUDENT | 1VT22CS033 Neha Patil (CSE) |
-| `student5@vtu.edu.in` | STUDENT | 1VT22EC019 Karthik Bhat (ECE, lateral) |
-| `student6@vtu.edu.in` | STUDENT | 1VT22CS027 Rohan Gowda (CSE, lateral) — **DISABLED**, login must be refused |
+| `student@vtu.edu.in` | STUDENT | 1RV22CS001 Aarav Sharma (CS) |
+| `student2@vtu.edu.in` | STUDENT | 1RV22IS014 Diya Nair (IS) — has reached the 100-point target |
+| `student3@vtu.edu.in` | STUDENT | 1RV22EC008 Ishita Rao (EC) |
+| `student4@vtu.edu.in` | STUDENT | 1RV22CD033 Neha Patil (CD) |
+| `student5@vtu.edu.in` | STUDENT | 1RV23EI419 Karthik Bhat (EI, lateral) |
+| `student6@vtu.edu.in` | STUDENT | 1RV23CY402 Rohan Gowda (CY, lateral) — **DISABLED**, login must be refused |
 | `club@vtu.edu.in` | CLUB_LEAD | Robotics Club |
 | `cultural.lead@vtu.edu.in` | CLUB_LEAD | Cultural Club |
 | `nss.lead@vtu.edu.in` | CLUB_LEAD | NSS Unit |
 | `coding.lead@vtu.edu.in` | CLUB_LEAD | Coding Club |
 | `dean@vtu.edu.in` | DEAN | — |
-| `hod@vtu.edu.in` | HOD | CSE |
-| `hod.ece@vtu.edu.in` | HOD | ECE |
+| `hod@vtu.edu.in` | HOD | CS |
+| `hod.ece@vtu.edu.in` | HOD | EC |
 
-Departments seeded: CSE, ISE, ECE, ME, CV.
+Also seeded (no account): 1RV19AI050 Ananya Hegde (AI), GRADUATED — kept for history.
+
+Departments seeded: IS, CS, CY, CD, AI, EC, EI, ME, CV.
+
+An existing database seeded before the RVCE change is converted once with `scripts/rvce_correction.py` (dry run by
+default; see its docstring for the transaction and file-handling sequence).
 
 ## Migrations
     docker compose exec api alembic upgrade head

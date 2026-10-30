@@ -25,7 +25,7 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-3xl grid md:grid-cols-2 gap-4">
         <form onSubmit={submit} className="bg-white rounded-xl border border-soft/40 p-6">
-          <div className="text-2xl font-bold text-maroon">VTU Activity Points Ledger</div>
+          <div className="text-2xl font-bold text-maroon">RVCE Activity Points Ledger</div>
           <p className="text-mute text-sm mb-4">Sign in to your dashboard</p>
           <Field label="Email" className="mb-3"><input className={INPUT} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@vtu.edu.in" /></Field>
           <Field label="Password" className="mb-3"><input className={INPUT} type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>

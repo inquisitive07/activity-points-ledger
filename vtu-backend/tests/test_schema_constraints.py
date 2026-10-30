@@ -8,7 +8,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.models import Base, Event, PointLedger, student_point_summary
 
 EVENT = "(SELECT event_id FROM event WHERE event_name = '{}')"
-ROBOWARS, RHYTHM, HACK = EVENT.format("RoboWars 2026"), EVENT.format("Rhythm Fest"), EVENT.format("HackVTU 24h")
+ROBOWARS, RHYTHM, HACK = EVENT.format("RoboWars 2026"), EVENT.format("Rhythm Fest"), EVENT.format("HackRVCE 24h")
 BATCH = "(SELECT min(ocr_batch_id) FROM ocr_batch)"
 
 
@@ -20,7 +20,7 @@ def rejected(db, sql, error=IntegrityError):
     return str(exc.value.orig)
 
 
-def ledger_sql(usn="1VT22CS027", event=ROBOWARS, source="BULK_APPROVAL", batch=BATCH, request="NULL",
+def ledger_sql(usn="1RV23CY402", event=ROBOWARS, source="BULK_APPROVAL", batch=BATCH, request="NULL",
                status="ACTIVE", supersedes="NULL", points="5"):
     return (f"INSERT INTO point_ledger (usn, event_id, points_awarded, award_date, source_type, source_request_id, "
             f"source_ocr_batch_id, approved_by, approved_at, status, supersedes_ledger_id) VALUES ('{usn}', {event}, "
@@ -38,7 +38,7 @@ def test_all_14_tables_and_the_view_exist(db):
 # --- keys, nullability, checks -----------------------------------------------------------------------------------
 
 def test_primary_key_rejects_duplicates(db):
-    assert "pk_department" in rejected(db, "INSERT INTO department VALUES ('CSE', 'Duplicate CSE')")
+    assert "pk_department" in rejected(db, "INSERT INTO department VALUES ('CS', 'Duplicate CS')")
 
 
 def test_identity_columns_cannot_be_set_by_hand(db):
@@ -46,25 +46,25 @@ def test_identity_columns_cannot_be_set_by_hand(db):
 
 
 def test_foreign_key_rejects_unknown_department(db):
-    msg = rejected(db, "INSERT INTO student VALUES ('1VT22XX001', 'X', 'x@vtu.edu.in', 'XX', 'REGULAR', 2022, 1, 'ACTIVE')")
+    msg = rejected(db, "INSERT INTO student VALUES ('1RV22XX001', 'X', 'x@vtu.edu.in', 'XX', 'REGULAR', 2022, 1, 'ACTIVE')")
     assert "fk_student_department_code_department" in msg
 
 
 def test_student_entry_type_must_exist_in_point_requirement(db):
     db.execute(text("ALTER TABLE student DROP CONSTRAINT ck_student_entry_type"))   # isolate the FK
-    msg = rejected(db, "INSERT INTO student VALUES ('1VT22CS900', 'X', 'x@vtu.edu.in', 'CSE', 'OTHER', 2022, 1, 'ACTIVE')")
+    msg = rejected(db, "INSERT INTO student VALUES ('1RV22CS900', 'X', 'x@vtu.edu.in', 'CS', 'OTHER', 2022, 1, 'ACTIVE')")
     assert "fk_student_entry_type_point_requirement" in msg
 
 
 def test_not_null_is_enforced(db):
-    msg = rejected(db, "INSERT INTO student VALUES ('1VT22CS901', NULL, 'y@vtu.edu.in', 'CSE', 'REGULAR', 2022, 1, 'ACTIVE')")
+    msg = rejected(db, "INSERT INTO student VALUES ('1RV22CS901', NULL, 'y@vtu.edu.in', 'CS', 'REGULAR', 2022, 1, 'ACTIVE')")
     assert 'null value in column "name"' in msg
 
 
 @pytest.mark.parametrize("sql, constraint", [
-    ("INSERT INTO student VALUES ('1VT22CS902', 'X', 'z@vtu.edu.in', 'CSE', 'REGULAR', 2022, 9, 'ACTIVE')",
+    ("INSERT INTO student VALUES ('1RV22CS902', 'X', 'z@vtu.edu.in', 'CS', 'REGULAR', 2022, 9, 'ACTIVE')",
      "ck_student_current_semester"),
-    ("INSERT INTO student VALUES ('1VT22CS903', 'X', 'w@vtu.edu.in', 'CSE', 'REGULAR', 2022, 1, 'EXPELLED')",
+    ("INSERT INTO student VALUES ('1RV22CS903', 'X', 'w@vtu.edu.in', 'CS', 'REGULAR', 2022, 1, 'EXPELLED')",
      "ck_student_student_status"),
     ("UPDATE event SET event_status = 'CANCELLED' WHERE event_name = 'RoboWars 2026'", "ck_event_event_status"),
     ("UPDATE event SET standard_points = -1 WHERE event_name = 'RoboWars 2026'", "ck_event_standard_points"),
@@ -92,9 +92,9 @@ def test_storage_key_is_unique(db):
 
 @pytest.mark.parametrize("role, usn, dept, club", [
     ("STUDENT", "NULL", "NULL", "NULL"),                 # student without a student
-    ("STUDENT", "'1VT22CS027'", "'CSE'", "NULL"),         # student with an extra department
+    ("STUDENT", "'1RV23CY402'", "'CS'", "NULL"),         # student with an extra department
     ("HOD", "NULL", "NULL", "NULL"),                     # HOD without a department
-    ("CLUB_LEAD", "NULL", "'CSE'", "NULL"),               # club lead with a department instead of a club
+    ("CLUB_LEAD", "NULL", "'CS'", "NULL"),               # club lead with a department instead of a club
     ("DEAN", "NULL", "NULL", "(SELECT min(club_id) FROM club)"),
 ])
 def test_role_association_rule(db, role, usn, dept, club):
@@ -105,14 +105,14 @@ def test_role_association_rule(db, role, usn, dept, club):
 
 def test_role_association_accepts_valid_accounts(db):
     db.execute(text("INSERT INTO user_account (email, password_hash, role, account_status, department_code) "
-                    "VALUES ('hod.new@vtu.edu.in', 'x', 'HOD', 'ACTIVE', 'ECE')"))
+                    "VALUES ('hod.new@vtu.edu.in', 'x', 'HOD', 'ACTIVE', 'EC')"))
 
 
 # --- point_request rules -----------------------------------------------------------------------------------------
 
 def request_sql(type_="NEW_ACTIVITY", status="PENDING_CLUB", correction="NULL", extra_cols="", extra_vals=""):
     return (f"INSERT INTO point_request (usn, event_id, request_type, claimed_points, reason, submitted_by, "
-            f"correction_of_ledger_id, status{extra_cols}) VALUES ('1VT22CS027', {HACK}, '{type_}', 15, 'r', "
+            f"correction_of_ledger_id, status{extra_cols}) VALUES ('1RV23CY402', {HACK}, '{type_}', 15, 'r', "
             f"'student6@vtu.edu.in', {correction}, '{status}'{extra_vals})")
 
 
@@ -156,9 +156,9 @@ def test_ledger_source_columns_must_match_source_type(db):
 
 
 def test_only_one_active_award_per_student_and_event(db):
-    msg = rejected(db, ledger_sql(usn="1VT22CS001", event=ROBOWARS))   # already has an ACTIVE RoboWars award
+    msg = rejected(db, ledger_sql(usn="1RV22CS001", event=ROBOWARS))   # already has an ACTIVE RoboWars award
     assert "ux_point_ledger_one_active_award" in msg
-    db.execute(text(ledger_sql(usn="1VT22CS001", event=ROBOWARS, status="REVOKED")))   # history rows are allowed
+    db.execute(text(ledger_sql(usn="1RV22CS001", event=ROBOWARS, status="REVOKED")))   # history rows are allowed
 
 
 def test_points_cannot_be_negative(db):
@@ -178,7 +178,7 @@ def test_correction_preserves_the_original_award(db):
     rhythm = select(Event.event_id).where(Event.event_name == "Rhythm Fest").scalar_subquery()
     rows = db.execute(select(PointLedger.ledger_id, PointLedger.status, PointLedger.points_awarded,
                              PointLedger.supersedes_ledger_id)
-                      .where(PointLedger.usn == "1VT22CS001", PointLedger.event_id == rhythm)
+                      .where(PointLedger.usn == "1RV22CS001", PointLedger.event_id == rhythm)
                       .order_by(PointLedger.ledger_id)).all()
     (orig_id, orig_status, orig_pts, _), (_, new_status, new_pts, supersedes) = rows
     assert (orig_status, orig_pts, new_status, new_pts) == ("SUPERSEDED", 15, "ACTIVE", 20)
@@ -201,20 +201,20 @@ def summary(db, usn):
 
 
 def test_view_counts_only_active_awards(db):
-    s = summary(db, "1VT22CS001")   # RoboWars 10 + Rhythm 20 (corrected; the superseded 15 is ignored) + NSS 40
+    s = summary(db, "1RV22CS001")   # RoboWars 10 + Rhythm 20 (corrected; the superseded 15 is ignored) + NSS 40
     assert (s.required_points, s.earned_points, s.remaining_points, s.target_reached) == (100, 70, 30, False)
 
 
 def test_view_gives_zero_for_a_student_with_no_awards(db):
-    s = summary(db, "1VT22CS027")   # lateral entry, no ledger rows
+    s = summary(db, "1RV23CY402")   # lateral entry, no ledger rows
     assert (s.required_points, s.earned_points, s.remaining_points, s.target_reached) == (75, 0, 75, False)
 
 
 def test_view_does_not_cap_earned_points(db):
-    s = summary(db, "1VT22CS014")
+    s = summary(db, "1RV22IS014")
     assert (s.earned_points, s.remaining_points, s.target_reached) == (100, 0, True)
-    db.execute(text(ledger_sql(usn="1VT22CS014", event=EVENT.format("Cloud Computing Workshop"), points="5")))
-    s = summary(db, "1VT22CS014")
+    db.execute(text(ledger_sql(usn="1RV22IS014", event=EVENT.format("Cloud Computing Workshop"), points="5")))
+    s = summary(db, "1RV22IS014")
     assert (s.earned_points, s.remaining_points, s.target_reached) == (105, 0, True)
 
 
@@ -229,9 +229,9 @@ def test_failed_bulk_commit_rolls_back_every_award(db):
     before = db.scalar(select(func.count()).select_from(PointLedger))
     with pytest.raises(IntegrityError):
         with db.begin_nested():                                     # stands in for the commit transaction
-            db.execute(text(ledger_sql(usn="1VT22CS027", event=HACK)))   # valid
-            db.execute(text(ledger_sql(usn="1VT22CS033", event=HACK)))   # valid
-            db.execute(text(ledger_sql(usn="1VT22CS001", event=ROBOWARS)))   # duplicate ACTIVE award -> fails
+            db.execute(text(ledger_sql(usn="1RV23CY402", event=HACK)))   # valid
+            db.execute(text(ledger_sql(usn="1RV22CD033", event=HACK)))   # valid
+            db.execute(text(ledger_sql(usn="1RV22CS001", event=ROBOWARS)))   # duplicate ACTIVE award -> fails
     assert db.scalar(select(func.count()).select_from(PointLedger)) == before
 
 
