@@ -22,7 +22,28 @@ Volumes: `pgdata` (database files), `storage` (uploaded files), `paddle_models` 
     docker compose exec api python scripts/seed.py
     curl http://localhost:8001/health                     # {"status":"ok"}
 
-Demo users (password `vtu@123`): student@ / club@ / dean@ / hod@ vtu.edu.in
+### Demo accounts — LOCAL DEVELOPMENT / DEMO ONLY
+Created by `scripts/seed.py` for the local Docker database. Every account uses the password **`vtu@123`** (stored
+only as a bcrypt hash, with a separate salt per account). Never seed these accounts into a shared or production
+database.
+
+| Email | Role | Linked to |
+|---|---|---|
+| `student@vtu.edu.in` | STUDENT | 1VT22CS001 Aarav Sharma (CSE) |
+| `student2@vtu.edu.in` | STUDENT | 1VT22CS014 Diya Nair (CSE) — has reached the 100-point target |
+| `student3@vtu.edu.in` | STUDENT | 1VT22EC008 Ishita Rao (ECE) |
+| `student4@vtu.edu.in` | STUDENT | 1VT22CS033 Neha Patil (CSE) |
+| `student5@vtu.edu.in` | STUDENT | 1VT22EC019 Karthik Bhat (ECE, lateral) |
+| `student6@vtu.edu.in` | STUDENT | 1VT22CS027 Rohan Gowda (CSE, lateral) — **DISABLED**, login must be refused |
+| `club@vtu.edu.in` | CLUB_LEAD | Robotics Club |
+| `cultural.lead@vtu.edu.in` | CLUB_LEAD | Cultural Club |
+| `nss.lead@vtu.edu.in` | CLUB_LEAD | NSS Unit |
+| `coding.lead@vtu.edu.in` | CLUB_LEAD | Coding Club |
+| `dean@vtu.edu.in` | DEAN | — |
+| `hod@vtu.edu.in` | HOD | CSE |
+| `hod.ece@vtu.edu.in` | HOD | ECE |
+
+Departments seeded: CSE, ISE, ECE, ME, CV.
 
 ## Migrations
     docker compose exec api alembic upgrade head

@@ -18,11 +18,14 @@ services:
     # PaddlePaddle publishes Linux wheels for x86_64 only, so on Apple Silicon this image runs under emulation.
     platform: linux/amd64
     env_file: .env
+    environment:
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"   # skip the slow model-host connectivity check on startup
     depends_on:
       db: { condition: service_healthy }
     ports: ["8001:8000"]
     volumes:
       - ./app:/srv/app
+      - ./alembic.ini:/srv/alembic.ini
       - ./alembic:/srv/alembic
       - ./scripts:/srv/scripts
       - ./tests:/srv/tests
