@@ -19,7 +19,6 @@ export const STUDENTS = [
   ['1RV22EC008', 'Ishita Rao', 'EC', 'REGULAR'], ['1RV23EI419', 'Karthik Bhat', 'EI', 'LATERAL'],
 ].map(([usn, name, dept, type]) => ({ usn, name, dept, type, email: usn.toLowerCase() + '@vtu.edu.in' }));
 
-export const CLUBS = ['Robotics Club', 'Cultural Club', 'NSS Unit', 'Coding Club'];
 
 export const EVENTS = [
   { id: 1, name: 'RoboWars 2026', club: 'Robotics Club', date: '2026-03-14', venue: 'Main Auditorium', url: 'vtu.edu.in/robowars', pts: 10 },
@@ -56,11 +55,4 @@ export const AUDIT = [
   { t: '2026-04-12 10:14', who: 'Dr. R. Narayan', act: 'APPROVE_OCR_BATCH', ent: 'BATCH #41' },
   { t: '2026-04-02 16:40', who: 'Dr. R. Narayan', act: 'APPROVE_CORRECTION', ent: 'REQUEST #488' },
   { t: '2026-03-21 09:05', who: 'Meera Iyer', act: 'CLUB_VERIFY', ent: 'REQUEST #470' },
-];
-
-export const OCR_EXCEPTIONS = [
-  { id: 1, page: 4, usn: '1RV22CS099', name: 'Unknown Student', pts: 10, issue: 'UNKNOWN_USN', st: 'open' },
-  { id: 2, page: 9, usn: '1RV22IS014', name: 'Diya Nairr', pts: 10, issue: 'NAME_MISMATCH', st: 'open' },
-  { id: 3, page: 17, usn: '1RV22EC008', name: 'Ishita Rao', pts: 100, issue: 'POINT_ERROR', st: 'open' },
-  { id: 4, page: 23, usn: '1RV23EI4l9', name: 'Karthik Bhat', pts: 10, issue: 'UNKNOWN_USN', st: 'open' },
 ];

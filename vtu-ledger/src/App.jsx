@@ -6,7 +6,8 @@ import Login from './pages/Login.jsx';
 import { StudentHome, StudentEvents, Claims, Vault } from './pages/Student.jsx';
 import { ClubDashboard, ClubEvents, ClubQueue } from './pages/Club.jsx';
 // StudentImport (pages/Dean.jsx) is kept for a later phase but not routed: student import is seed-only for the MVP.
-import { OcrPipeline, AuditReports } from './pages/Dean.jsx';
+import { AuditReports } from './pages/Dean.jsx';
+import DeanOcr from './pages/DeanOcr.jsx';
 import DeanClaims from './pages/DeanClaims.jsx';
 import DeanStudents from './pages/DeanStudents.jsx';
 import DeanEvents from './pages/DeanEvents.jsx';
@@ -38,7 +39,7 @@ export default function App() {
       <Route path="/club" element={<Guard role="CLUB_LEAD"><ClubDashboard /></Guard>} />
       <Route path="/club/events" element={<Guard role="CLUB_LEAD"><ClubEvents /></Guard>} />
       <Route path="/club/queue" element={<Guard role="CLUB_LEAD"><ClubQueue /></Guard>} />
-      <Route path="/dean" element={<Guard role="DEAN"><OcrPipeline /></Guard>} />
+      <Route path="/dean" element={<Guard role="DEAN"><DeanOcr /></Guard>} />
       <Route path="/dean/claims" element={<Guard role="DEAN"><DeanClaims /></Guard>} />
       <Route path="/dean/students" element={<Guard role="DEAN"><DeanStudents /></Guard>} />
       <Route path="/dean/events" element={<Guard role="DEAN"><DeanEvents /></Guard>} />

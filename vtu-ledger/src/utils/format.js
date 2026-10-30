@@ -69,6 +69,10 @@ const LABELS = {
   MANUAL_CORRECTION: 'Correction',
   // OCR batches
   REVIEW: 'Awaiting review',
+  // OCR issue codes (app/ocr/validation.py ISSUE_PREFIXES) whose generic label would be unclear
+  UNMATCHED_LOW_CONFIDENCE: 'Low-confidence USN (not matched)',
+  STUDENT_NOT_ACTIVE: 'Student not active',
+  OTHER: 'Other issue',
   // documents
   SIGNED_POINT_LIST: 'Signed point list',
   ATTENDANCE_SHEET: 'Attendance sheet',
@@ -111,4 +115,14 @@ export function safeHttpUrl(value) {
   } catch {
     return null;
   }
+}
+
+/** Milliseconds -> "45 s", "3 min 05 s", "1 h 02 min". Negative or missing -> ''. */
+export function formatDuration(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, '0')} s`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
 }
