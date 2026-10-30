@@ -1,21 +1,35 @@
-# VTU Activity Points Ledger — Backend (step 1: infrastructure + schema)
+# VTU Activity Points Ledger — Backend
 
-Stack: FastAPI · SQLAlchemy 2 · Alembic · PostgreSQL 16 · Redis · MinIO (Docker Compose)
+Stack: FastAPI · SQLAlchemy 2 · Alembic · PostgreSQL 16 · PaddleOCR (Docker Compose).
+Uploaded files use private local storage (a Docker volume); S3-compatible object storage is a later phase.
+
+## Services
+| Service | Runs in | Reach it from the Mac | Reach it from other containers |
+|---|---|---|---|
+| `db` (PostgreSQL 16) | Docker | `localhost:5433` (pgAdmin, psql) | `db:5432` |
+| `api` (FastAPI) | Docker, `linux/amd64` (emulated on Apple Silicon) | `http://localhost:8001` (docs: `/docs`) | `api:8000` |
+
+Port 5432 on the Mac is a separate Homebrew PostgreSQL server; it is not this project's database.
+
+Volumes: `pgdata` (database files), `storage` (uploaded files), `paddle_models` (OCR model cache).
+`docker compose stop` / `down` keep volumes; only `docker compose down -v` deletes them.
 
 ## Run
     cp .env.example .env
-    docker compose up --build        # db, redis, minio, api (migrations run on start)
+    docker compose build api                              # first build is slow (OCR libraries)
+    docker compose run --rm --no-deps api python scripts/ocr_smoke.py   # optional OCR health check
+    docker compose up -d                                  # db + api; migrations run on api start
     docker compose exec api python scripts/seed.py
-    open http://localhost:8000/health   # {"status":"ok"}   docs: /docs
+    curl http://localhost:8001/health                     # {"status":"ok"}
 
 Demo users (password `vtu@123`): student@ / club@ / dean@ / hod@ vtu.edu.in
 
 ## Migrations
     docker compose exec api alembic upgrade head
-    docker compose exec api alembic revision --autogenerate -m "describe change"
-    docker compose exec api alembic downgrade -1
+    docker compose exec api alembic current
+    docker compose exec api alembic revision -m "describe change"
 
-## Schema highlights
+## Schema highlights (pre-rebuild — being replaced by the 14-table schema in CLAUDE.md)
 - `point_requirements`: 100 Regular / 75 Lateral. `point_ledger`: rows are never deleted, only SUPERSEDED.
 - Partial unique index: one live (non-superseded) award per student per event.
 - Rejections must carry a reviewer comment (CHECK). HOD rows must have a department, club leads a club.

@@ -1,0 +1,4 @@
+# OCR engine (PaddleOCR + PaddlePaddle). Kept separate from requirements.txt because it is large;
+# the API and tests run without it, and OCR reports itself as unavailable if it is not installed.
+paddlepaddle==3.3.1
+paddleocr==3.7.0

@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: vtu
       POSTGRES_PASSWORD: vtu_dev_password
       POSTGRES_DB: vtu_ledger
-    ports: ["5433:5432"]
+    ports: ["5433:5432"]            # host 5433 -> container 5432 (5432 on the Mac is a separate Homebrew server)
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vtu -d vtu_ledger"]
@@ -13,18 +13,24 @@ services:
       timeout: 3s
       retries: 10
 
-  redis:            # job queue for the OCR worker (used from step 5)
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-
   api:
     build: .
+    # PaddlePaddle publishes Linux wheels for x86_64 only, so on Apple Silicon this image runs under emulation.
+    platform: linux/amd64
     env_file: .env
     depends_on:
       db: { condition: service_healthy }
     ports: ["8001:8000"]
-    volumes: ["./app:/srv/app", "./alembic:/srv/alembic", "./scripts:/srv/scripts", "./tests:/srv/tests"]
+    volumes:
+      - ./app:/srv/app
+      - ./alembic:/srv/alembic
+      - ./scripts:/srv/scripts
+      - ./tests:/srv/tests
+      - storage:/srv/storage              # private uploaded files (never served directly)
+      - paddle_models:/root/.paddlex      # OCR model cache, downloaded once
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
 volumes:
   pgdata:
+  storage:
+  paddle_models:

@@ -1,5 +1,5 @@
-"""Login brute-force guard: 5 failures per (email, IP) per 5 minutes. In-memory (single process);
-swap for Redis when running more than one API instance."""
+"""Login brute-force guard: 5 failures per (email, IP) per 5 minutes. In-memory, so it applies per
+API process and resets on restart; a shared store would be needed when running several API instances."""
 import time
 from collections import defaultdict, deque
 

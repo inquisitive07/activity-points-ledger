@@ -2273,6 +2273,99 @@ between a summary count and the detailed field definitions, point it out
 and ask for a decision where necessary. Never silently remove or invent
 attributes.
 
+### 18.5 Owner-approved implementation decisions (2026-10-30)
+
+The project owner approved the following decisions. They resolve the
+open items in 18.2 and 18.3 and are binding for implementation. They are
+implementation decisions, not values defined by the source document.
+
+**Schema baseline.** The earlier UUID-based schema (tagged
+`pre-schema-rebuild` in Git) is replaced by the 14-table schema in
+Section 5 through a new Alembic baseline migration. Table names are
+lowercase singular (`student`, `user_account`, ...). Status domains are
+`VARCHAR` + `CHECK`, not native PostgreSQL enum types.
+
+**CHECK domains**
+
+  Column                           Allowed values
+  -------------------------------- ------------------------------------------------
+  `STUDENT.current_semester`       1--8, nullable
+  `USER_ACCOUNT.account_status`    `ACTIVE`, `DISABLED`
+  `EVENT.event_status`             `DRAFT`, `PUBLISHED`, `COMPLETED`, `CLOSED`
+  `DOCUMENT.document_status`       `ACTIVE`, `ARCHIVED`, `DELETED` (soft deletion)
+  `OCR_BATCH.status`               `QUEUED`, `PROCESSING`, `REVIEW`, `COMMITTED`, `FAILED`
+  `OCR_RECORD.validation_status`   `VALID`, `EXCEPTION`, `CONFIRMED`, `DISMISSED`
+
+Values already listed in Section 5 (entry types, student statuses,
+roles, document types, request types and statuses, ledger source types
+and statuses) are used as the CHECK domains for those columns.
+
+**Referential and consistency rules**
+
+-   Role-to-association rule (3.5) is enforced by a database CHECK and
+    by application validation.
+-   `STUDENT.entry_type` is a foreign key to
+    `POINT_REQUIREMENT.entry_type`.
+-   Ledger source consistency (CHECK):
+    -   `BULK_APPROVAL`: `source_ocr_batch_id` set, `source_request_id`
+        NULL.
+    -   `INDIVIDUAL_CLAIM`: `source_request_id` set,
+        `source_ocr_batch_id` NULL.
+    -   `MANUAL_CORRECTION`: `supersedes_ledger_id` set (an approved
+        `CORRECTION` request also sets `source_request_id`).
+-   Duplicate awards: at most one `ACTIVE` ledger row per (`usn`,
+    `event_id`), enforced by a partial unique index. A bulk commit flags
+    an existing award as an exception; it never supersedes
+    automatically.
+-   `AUDIT_LOG` is append-only (a database trigger blocks UPDATE and
+    DELETE).
+
+**Request state machine**
+
+``` text
+create:        club event -> PENDING_CLUB; non-club event -> PENDING_DEAN
+PENDING_CLUB -> PENDING_DEAN | REJECTED | WITHDRAWN | RESOLVED
+PENDING_DEAN -> APPROVED | REJECTED | WITHDRAWN | RESOLVED
+APPROVED, REJECTED, RESOLVED, WITHDRAWN are terminal.
+```
+
+-   `RESOLVED` is set only by a committed signed-list (bulk OCR)
+    workflow.
+-   `WITHDRAWN` is set only by the requesting student.
+-   A club rejection is final; the student may submit a new request.
+-   A rejection requires a comment at both the club and Dean stages.
+-   Points must be non-negative (Section 5). No other point range is
+    imposed.
+
+**Other approved rules**
+
+-   Club issue counts (4.5) follow the source document: the open club
+    issue count includes only `MISSING_FROM_LIST` and `CORRECTION`
+    requests in `PENDING_CLUB`.
+-   Non-club events (`club_id` NULL) are created by the Dean.
+-   OCR record corrections: `extracted_usn` and `raw_extraction` keep
+    what OCR read; the Dean selects `matched_student_usn` and may edit
+    `extracted_name` and `extracted_points`, each edit audited with old
+    and new values.
+-   Certificate OCR (source feature "Certificate OCR") is a student
+    form-prefill only and never creates an award. Lower priority than
+    the main workflow.
+-   Uploads: PDF, JPEG and PNG only; maximum 10 MB.
+-   Student import: seed data only for the MVP.
+
+**MVP infrastructure decisions**
+
+-   Redis is removed. OCR background work uses FastAPI background tasks
+    with `OCR_BATCH.status`; a PostgreSQL job-claiming worker is a later
+    option.
+-   MinIO / S3-compatible object storage is postponed. The MVP uses
+    private local file storage behind a storage module so object storage
+    can replace it later.
+-   The API image is built for `linux/amd64` because PaddlePaddle
+    publishes Linux wheels for x86_64 only; on Apple Silicon it runs
+    under emulation. Fallback: run the API natively on macOS against the
+    Docker database.
+
 ------------------------------------------------------------------------
 
 ## 19. Final project invariants
