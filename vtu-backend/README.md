@@ -69,13 +69,22 @@ default; see its docstring for the transaction and file-handling sequence).
 
 Next: step 2 — auth (bcrypt + JWT) and role/department scoping.
 
-## Step 2 — Auth (done)
-    POST /auth/login   {email, password} -> {access_token, user}
-    GET  /auth/me      (Bearer token)
-    GET  /students, GET /students/{usn}   (scoped by role)
-    docker compose exec api pytest -q tests
+## CP1 — Authentication and authorization
+    POST /auth/login    {email, password} -> {access_token, token_type, expires_in, user}
+    GET  /auth/me       (Bearer token)
+    POST /auth/logout   (Bearer token) -> 204; that token stops working
+    GET  /students, GET /students/{usn}   (DEAN: all · HOD: own department · STUDENT: self · CLUB_LEAD: 403)
+- bcrypt password hashes; HS256 JWT with the login email as `sub`, lifetime `ACCESS_TOKEN_MINUTES` (default 480).
+- Every request reloads `user_account`: role and `account_status` come from the database, never from the token.
+  DISABLED accounts get 403 at login and 401 with any existing token.
+- Logout writes a `LOGOUT` audit row carrying the token's `jti`; tokens with a logged-out `jti` are rejected.
+- Object scopes for students, requests, awards and documents live in `app/permissions.py`.
+- Login, failed login, disabled-account login and logout are audited (`entity_type = user_account`, `entity_id = 0`).
+- Set a long random `JWT_SECRET` outside local development (the API logs a warning for the default).
 
-## Step 3 — Events, claims, approval workflow (done)
+    docker compose run --rm --no-deps api pytest -q tests     # uses vtu_ledger_test only
+
+## Step 3 — Events, claims, approval workflow (pre-rebuild; being ported in CP2, not mounted)
     GET/POST /events          POST = club lead only (own club)
     GET  /clubs, /clubs/accountability (Dean matrix)
     POST /requests            student submits NEW_ACTIVITY / MISSING_FROM_LIST / CORRECTION

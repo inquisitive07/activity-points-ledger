@@ -1,31 +1,64 @@
-from pydantic import BaseModel
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, Field
 
 
 class LoginIn(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=150)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class UserOut(BaseModel):
-    id: str
+    """The signed-in account. Never includes password_hash."""
     email: str
-    name: str
     role: str
+    display_name: str
+    student_usn: str | None = None
     department_code: str | None = None
     club_id: int | None = None
-    usn: str | None = None
+    club_name: str | None = None
+    last_login_at: datetime | None = None
 
 
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    expires_in: int
     user: UserOut
 
 
-from datetime import date
-from typing import Literal
+class StudentSummaryOut(BaseModel):
+    usn: str
+    name: str
+    department_code: str
+    entry_type: str
+    student_status: str
+    required_points: Decimal
+    earned_points: Decimal
+    remaining_points: Decimal
+    target_reached: bool
 
-from pydantic import Field, field_validator, model_validator
+
+class LedgerRowOut(BaseModel):
+    ledger_id: int
+    event_id: int
+    event_name: str
+    points_awarded: Decimal
+    award_date: date
+    source_type: str
+    status: str
+    supersedes_ledger_id: int | None = None
+
+
+class StudentDetailOut(StudentSummaryOut):
+    ledger: list[LedgerRowOut]
+
+
+# --- Event/request inputs for the routers ported in CP2 (events.py, claims.py; not mounted yet) ---------------
+from typing import Literal  # noqa: E402
+
+from pydantic import field_validator, model_validator  # noqa: E402
 
 
 class EventIn(BaseModel):

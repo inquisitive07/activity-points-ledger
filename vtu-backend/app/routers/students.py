@@ -1,52 +1,49 @@
-"""Student directory + summary. Scope is enforced HERE, in the query — not in the frontend."""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+"""Student directory and point summary. Scope is enforced in the query (app/permissions.py), not in the frontend."""
+from fastapi import APIRouter, Depends
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import get_current_user, require_roles
-from app.models import (Document, Event, LedgerStatus, PointLedger, PointRequirement, Role, Student, User)
+from app.models import Event, PointLedger, Role, Student, UserAccount, student_point_summary as sps
+from app.permissions import not_found, require_roles, student_scope
+from app.schemas import LedgerRowOut, StudentDetailOut, StudentSummaryOut
 
 router = APIRouter(prefix="/students", tags=["students"])
+readers = require_roles(Role.DEAN, Role.HOD, Role.STUDENT)
 
 
-def visible_students(user: User):
-    """The base query every student-facing endpoint must start from."""
-    q = select(Student)
-    if user.role == Role.DEAN:
-        return q
-    if user.role == Role.HOD:
-        return q.where(Student.department_code == user.department_code)
-    if user.role == Role.STUDENT:
-        return q.where(Student.user_id == user.id)
-    return q.where(False)  # club leads have no student-directory access
+def summaries(user: UserAccount):
+    """Visible students joined with STUDENT_POINT_SUMMARY (the view supplies required/earned/remaining)."""
+    return (select(Student, sps.c.required_points, sps.c.earned_points, sps.c.remaining_points, sps.c.target_reached)
+            .join(sps, sps.c.usn == Student.usn).where(student_scope(user)))
 
 
-def summary_of(db: Session, s: Student) -> dict:
-    earned = db.scalar(select(func.coalesce(func.sum(PointLedger.points), 0)).where(
-        PointLedger.student_id == s.id, PointLedger.status != LedgerStatus.SUPERSEDED))
-    target = db.scalar(select(PointRequirement.points_required).where(PointRequirement.entry_type == s.entry_type))
-    return {"usn": s.usn, "name": s.name, "department_code": s.department_code, "entry_type": s.entry_type.value,
-            "earned": int(earned), "target": target, "target_reached": earned >= target}
+def summary_out(row) -> StudentSummaryOut:
+    s = row.Student
+    return StudentSummaryOut(usn=s.usn, name=s.name, department_code=s.department_code, entry_type=s.entry_type,
+                             student_status=s.student_status, required_points=row.required_points,
+                             earned_points=row.earned_points, remaining_points=row.remaining_points,
+                             target_reached=row.target_reached)
 
 
-@router.get("")
-def list_students(q: str = "", user: User = Depends(require_roles(Role.DEAN, Role.HOD, Role.STUDENT)), db: Session = Depends(get_db)):
-    stmt = visible_students(user)
-    if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(func.lower(Student.name).like(like) | func.lower(Student.usn).like(like))
-    return [summary_of(db, s) for s in db.scalars(stmt.order_by(Student.usn))]
+@router.get("", response_model=list[StudentSummaryOut])
+def list_students(q: str = "", user: UserAccount = Depends(readers), db: Session = Depends(get_db)):
+    stmt = summaries(user)
+    if q.strip():
+        like = f"%{q.strip().lower()}%"
+        stmt = stmt.where(or_(func.lower(Student.name).like(like), func.lower(Student.usn).like(like)))
+    return [summary_out(row) for row in db.execute(stmt.order_by(Student.usn))]
 
 
-@router.get("/{usn}")
-def student_detail(usn: str, user: User = Depends(require_roles(Role.DEAN, Role.HOD, Role.STUDENT)), db: Session = Depends(get_db)):
-    s = db.scalar(visible_students(user).where(Student.usn == usn.upper()))
-    if not s:  # out-of-scope and non-existent look identical (404) on purpose
-        raise HTTPException(404, "Student not found")
-    ledger = db.execute(select(PointLedger, Event.title).join(Event, Event.id == PointLedger.event_id)
-                        .where(PointLedger.student_id == s.id).order_by(PointLedger.id)).all()
-    docs = db.scalars(select(Document).where(Document.student_id == s.id)).all()
-    return {**summary_of(db, s),
-            "ledger": [{"id": l.id, "event": t, "points": l.points, "status": l.status.value, "source": l.source.value} for l, t in ledger],
-            "documents": [{"id": str(d.id), "filename": d.filename, "type": d.doc_type.value, "purpose": d.purpose.value} for d in docs]}
+@router.get("/{usn}", response_model=StudentDetailOut)
+def student_detail(usn: str, user: UserAccount = Depends(readers), db: Session = Depends(get_db)):
+    row = db.execute(summaries(user).where(Student.usn == usn.strip().upper())).first()
+    if row is None:             # out of scope and non-existent look the same on purpose
+        raise not_found("Student")
+    ledger = db.execute(select(PointLedger, Event.event_name).join(Event, Event.event_id == PointLedger.event_id)
+                        .where(PointLedger.usn == row.Student.usn).order_by(PointLedger.ledger_id)).all()
+    return StudentDetailOut(
+        **summary_out(row).model_dump(),
+        ledger=[LedgerRowOut(ledger_id=l.ledger_id, event_id=l.event_id, event_name=name,
+                             points_awarded=l.points_awarded, award_date=l.award_date, source_type=l.source_type,
+                             status=l.status, supersedes_ledger_id=l.supersedes_ledger_id) for l, name in ledger])

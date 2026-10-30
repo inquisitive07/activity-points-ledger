@@ -16,8 +16,8 @@ from app.config import settings
 from db_safety import (UnsafeTestDatabase, check_connected_database, check_head, check_server, check_test_url,
                        derive_test_url)
 
-# Written against the old UUID schema; rewritten in Phase 2 (API port). Skipped until then.
-collect_ignore = ["test_auth.py", "test_workflow.py"]
+# Written against the old UUID schema; rewritten with the CP2 request workflow. Skipped until then.
+collect_ignore = ["test_workflow.py"]
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -104,6 +104,25 @@ def db(db_engine):
     session.close()
     outer.rollback()
     connection.close()
+
+
+@pytest.fixture
+def client(db):
+    """An API client whose requests all run in the `db` session, so everything they write is rolled back.
+    The endpoints' own commits only release a savepoint inside that session's outer transaction."""
+    from fastapi.testclient import TestClient
+
+    from app import ratelimit
+    from app.db import get_db
+    from app.main import app
+
+    ratelimit.clear()
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        ratelimit.clear()
 
 
 def pytest_sessionfinish(session, exitstatus):
