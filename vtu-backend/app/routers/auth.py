@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import ratelimit
 from app.audit import audit
 from app.db import get_db
 from app.deps import get_current_user
@@ -22,13 +23,17 @@ def to_out(user: User, db: Session) -> UserOut:
 
 
 @router.post("/login", response_model=TokenOut)
-def login(body: LoginIn, db: Session = Depends(get_db)):
+def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+    key = f"{body.email.strip().lower()}|{request.client.host if request.client else '-'}"
+    ratelimit.check(key)
     user = db.scalar(select(User).where(User.email == body.email.strip().lower()))
     ok = verify_password(body.password, user.password_hash if user else _DUMMY)
     if not user or not ok or not user.is_active:
+        ratelimit.record_failure(key)
         audit(db, user.id if user else None, "LOGIN_FAILED", "user", detail={"email": body.email[:120]})
         db.commit()
         raise HTTPException(401, "Invalid email or password")
+    ratelimit.reset(key)
     audit(db, user.id, "LOGIN", "user", user.id)
     db.commit()
     return TokenOut(access_token=create_token(str(user.id), user.role.value), user=to_out(user, db))
