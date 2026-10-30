@@ -31,7 +31,7 @@ export class ApiError extends Error {
     this.detail = detail;
     /** 422 validation errors as { fieldName: message }, from FastAPI's list-form `detail`. */
     this.fieldErrors = Array.isArray(detail)
-      ? Object.fromEntries(detail.map((d) => [d.loc?.[d.loc.length - 1] ?? '_', d.msg]))
+      ? Object.fromEntries(detail.map((d) => [d.loc?.[d.loc.length - 1] ?? '_', String(d.msg ?? '').replace(/^Value error, /, '')]))
       : {};
   }
 }
@@ -55,7 +55,8 @@ function messageFrom(status, detail) {
   if (Array.isArray(detail) && detail.length) {
     return detail.map((d) => {
       const field = (d.loc || []).filter((p) => p !== 'body' && p !== 'query' && p !== 'path').join('.');
-      return field ? `${field}: ${d.msg}` : d.msg;
+      const msg = String(d.msg ?? '').replace(/^Value error, /, '');   // pydantic's prefix for custom validators
+      return field ? `${field}: ${msg}` : msg;
     }).join('; ');
   }
   return FALLBACK_MESSAGES[status] || (status >= 500 ? 'The server had a problem. Please try again.' : `Request failed (${status}).`);

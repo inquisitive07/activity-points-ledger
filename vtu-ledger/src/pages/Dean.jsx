@@ -3,7 +3,6 @@ import { Lock } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
 import { earned, need, today, CLUBS, OCR_EXCEPTIONS, POINT_REQUIREMENT } from '../data/mock.js';
 import { Page, Card, Field, Stat, Badge, Table, row, BTN, GHOST, INPUT } from '../components/ui.jsx';
-import { statusLabel } from '../utils/format.js';
 
 /* ---------- OCR verification pipeline ---------- */
 export function OcrPipeline() {
@@ -82,46 +81,6 @@ export function OcrPipeline() {
 }
 
 /* ---------- Individual claim approval ---------- */
-export function ClaimApprovals() {
-  const { requests, setRequests, setLedger, eventName, log, toast } = useApp();
-  const [comments, setComments] = useState({});
-  const queue = requests.filter((r) => r.st === 'PENDING_DEAN');
-  const approve = (r) => {
-    setLedger((l) => [...l.map((x) => (r.type === 'CORRECTION' && x.usn === r.usn && x.ev === r.ev && x.st === 'ACTIVE' ? { ...x, st: 'SUPERSEDED' } : x)),
-      { id: l.length + 1, usn: r.usn, ev: r.ev, pts: r.pts, date: today(), st: r.type === 'CORRECTION' ? 'CORRECTION' : 'ACTIVE', src: 'CLAIM' }]);
-    setRequests((x) => x.map((y) => (y.id === r.id ? { ...y, st: 'APPROVED' } : y)));
-    log('APPROVE_CLAIM', `REQUEST #${r.id}`); toast('Approved — POINT_LEDGER row created');
-  };
-  const reject = (r) => { setRequests((x) => x.map((y) => (y.id === r.id ? { ...y, st: 'REJECTED', cm: comments[r.id] } : y))); log('REJECT_CLAIM', `REQUEST #${r.id}`); toast('Claim rejected'); };
-  return (
-    <Page title="Individual Claim Approval" sub="Approval writes an ACTIVE row to the point ledger.">
-      <Card>
-        <Table cols={['ID', 'Student', 'Event', 'Type', 'Pts', 'Club note', 'Comment', 'Action']} empty="No claims awaiting the Dean."
-          rows={queue.map((r) => row(r.id, [`#${r.id}`, r.usn, eventName(r.ev), statusLabel(r.type), r.pts, r.cm || '—',
-            <input className={INPUT} placeholder="Comment (needed to reject)" value={comments[r.id] || ''} onChange={(e) => setComments({ ...comments, [r.id]: e.target.value })} />,
-            <div className="flex gap-1"><button className={BTN} onClick={() => approve(r)}>Approve</button><button className={GHOST} disabled={!(comments[r.id] || '').trim()} onClick={() => reject(r)}>Reject</button></div>]))} />
-      </Card>
-    </Page>
-  );
-}
-
-/* ---------- Club accountability matrix ---------- */
-export function ClubMatrix() {
-  const { requests, events } = useApp();
-  const rows = CLUBS.map((c) => {
-    const rs = requests.filter((r) => events.find((e) => e.id === r.ev)?.club === c);
-    const n = (...s) => rs.filter((r) => s.includes(r.st)).length;
-    return row(c, [c, <Badge s={n('PENDING_CLUB')} tone={n('PENDING_CLUB') ? 'warn' : 'ok'} />, <Badge s={n('PENDING_DEAN')} tone="info" />, <Badge s={n('APPROVED', 'REJECTED')} tone="ok" />]);
-  });
-  return (
-    <Page title="Club Accountability Matrix" sub="Counts update live from request status.">
-      <Card><Table cols={['Club', 'Open club issues', 'Pending Dean review', 'Resolved claims']} rows={rows} /></Card>
-    </Page>
-  );
-}
-
-/* ---------- Student batch import with live validation ---------- */
-const SAMPLE = 'usn,name,dept,type,email\n1RV23CS041,Anika Menon,CS,REGULAR,anika@vtu.edu.in\n1RV23EC,Bad Row,XX,LATERAL,not-an-email\n1RV22CS001,Aarav Sharma,CS,REGULAR,aarav@vtu.edu.in';
 export function StudentImport() {
   const { students, setStudents, log, toast } = useApp();
   const [text, setText] = useState('');

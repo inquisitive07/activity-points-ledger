@@ -1,5 +1,5 @@
 import { AlertTriangle, Loader2, Paperclip, X } from 'lucide-react';
-import { statusLabel } from '../utils/format.js';
+import { formatBytes, statusLabel } from '../utils/format.js';
 
 export const BTN = 'px-3 py-1.5 rounded-lg bg-brand hover:bg-brandl text-white font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 export const GHOST = 'px-3 py-1.5 rounded-lg border border-brand text-brand hover:bg-soft/30 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed';
@@ -89,34 +89,67 @@ export const Table = ({ cols, rows, empty = 'Nothing here yet.' }) => (
 );
 export const row = (key, cells, cls) => ({ key, cells, cls });
 
-/** Multi-file attachment with Document Type / Event / Purpose tagging */
-export const DOC_TYPES = ['Certificate PDF', 'Attendance List', 'Event Photo', 'Official Signed PDF', 'Other'];
-export function FileTagger({ files, setFiles, events }) {
+/**
+ * Files to upload with a request or award. Each file gets a backend document type; the event is set by the caller
+ * (shown as `eventLabel`), never chosen per file. There is no "purpose": a document becomes evidence by being linked.
+ * files: [{ key, file, documentType, problem }]   (problem: client-side check result, or null)
+ */
+export function FileAttachments({ files, setFiles, types, eventLabel, accept, check, defaultType, disabled }) {
   const add = (e) => {
-    const next = [...e.target.files].map((f) => ({
-      name: f.name,
-      dt: /\.pdf$/i.test(f.name) ? 'Certificate PDF' : /\.(jpe?g|png)$/i.test(f.name) ? 'Event Photo' : 'Other',
-      ev: events[0].id, purpose: 'Evidence',
+    const next = [...e.target.files].map((file, i) => ({
+      key: `${Date.now()}-${i}-${file.name}`, file, documentType: defaultType(file), problem: check(file),
     }));
     setFiles([...files, ...next]); e.target.value = '';
   };
-  const patch = (i, p) => setFiles(files.map((f, j) => (j === i ? { ...f, ...p } : f)));
+  const patch = (key, p) => setFiles(files.map((f) => (f.key === key ? { ...f, ...p } : f)));
   return (
     <div>
-      <input type="file" multiple onChange={add} className="text-sm mb-2" />
-      {files.map((f, i) => (
-        <div key={i} className="grid grid-cols-2 md:grid-cols-5 gap-2 items-end bg-blush rounded-lg p-2 mb-2">
-          <div className="col-span-2 text-sm font-medium truncate flex items-center gap-1"><Paperclip size={14} />{f.name}</div>
-          <Field label="Document type"><select className={INPUT} value={f.dt} onChange={(e) => patch(i, { dt: e.target.value })}>{DOC_TYPES.map((d) => <option key={d}>{d}</option>)}</select></Field>
-          <Field label="Associated event"><select className={INPUT} value={f.ev} onChange={(e) => patch(i, { ev: +e.target.value })}>{events.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}</select></Field>
-          <Field label="Purpose">
-            <div className="flex gap-1">
-              <select className={INPUT} value={f.purpose} onChange={(e) => patch(i, { purpose: e.target.value })}><option>Evidence</option><option>Official</option></select>
-              <button type="button" className={GHOST} aria-label="Remove file" onClick={() => setFiles(files.filter((_, j) => j !== i))}><X size={14} /></button>
-            </div>
+      <input type="file" multiple accept={accept} onChange={add} disabled={disabled} className="text-sm mb-2" />
+      {files.map((f) => (
+        <div key={f.key} className="grid grid-cols-2 md:grid-cols-5 gap-2 items-end bg-blush rounded-lg p-2 mb-2">
+          <div className="col-span-2 text-sm min-w-0">
+            <div className="font-medium truncate flex items-center gap-1"><Paperclip size={14} className="shrink-0" />{f.file.name}</div>
+            <div className="text-xs text-mute">{formatBytes(f.file.size)}{eventLabel ? ` · tagged to ${eventLabel}` : ''}</div>
+            {f.problem && <div className="text-xs text-brandl" role="alert">{f.problem}</div>}
+          </div>
+          <Field label="Document type" className="md:col-span-2">
+            <select className={INPUT} value={f.documentType} disabled={disabled} onChange={(e) => patch(f.key, { documentType: e.target.value })}>
+              {types.map((t) => <option key={t} value={t}>{statusLabel(t)}</option>)}
+            </select>
           </Field>
+          <div className="flex items-end">
+            <button type="button" className={GHOST} disabled={disabled} aria-label={`Remove ${f.file.name}`} onClick={() => setFiles(files.filter((x) => x.key !== f.key))}><X size={14} /></button>
+          </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Per-file outcome of uploadAndAttach(): which files failed, at which step, and why. */
+export function AttachmentResults({ results, onRetry, onDismiss, retrying, okText = 'attached', noun = 'attachment(s)' }) {
+  const failed = results.filter((r) => !r.ok);
+  if (!failed.length) return null;
+  return (
+    <div role="alert" className="border border-red-200 bg-white rounded-lg p-3 mt-3 text-sm">
+      <div className="font-semibold text-brandl mb-1">{failed.length} of {results.length} {noun} failed</div>
+      <ul className="space-y-1 mb-2">
+        {results.map((r) => (
+          <li key={r.item.key} className="flex gap-2">
+            <span className={r.ok ? 'text-ok' : 'text-brandl'}>{r.ok ? '✓' : '✗'}</span>
+            <span className="min-w-0 break-words">
+              <b>{r.item.file.name}</b>{' '}
+              {r.ok ? okText
+                : r.stage === 'upload' ? `not uploaded: ${r.error.message}`
+                : `uploaded to your vault (document #${r.documentId}) but not attached: ${r.error.message}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div className="flex gap-2">
+        {onRetry && <button type="button" className={BTN} disabled={retrying} onClick={onRetry}>{retrying ? 'Retrying…' : 'Retry failed files'}</button>}
+        {onDismiss && <button type="button" className={GHOST} disabled={retrying} onClick={onDismiss}>Dismiss</button>}
+      </div>
     </div>
   );
 }

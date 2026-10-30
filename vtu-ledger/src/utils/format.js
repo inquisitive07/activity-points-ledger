@@ -26,7 +26,16 @@ export function progressPercent(earned, required) {
   return Math.max(0, Math.min(100, (e / r) * 100));
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** 585 -> "585 B", 48213 -> "47.1 KB", 3145728 -> "3 MB". */
+export function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (bytes === null || bytes === undefined || !Number.isFinite(n) || n < 0) return EMPTY;
+  if (n < 1024) return `${n} B`;
+  const [value, unit] = n < 1024 * 1024 ? [n / 1024, 'KB'] : [n / (1024 * 1024), 'MB'];
+  return `${Number(value.toFixed(1))} ${unit}`;
+}
+
+const MONTHS =['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** "2026-03-18" -> "18 Mar 2026". Parsed by hand so a date never shifts across time zones. */
 export function formatDate(value) {
@@ -85,4 +94,21 @@ export function statusLabel(value) {
     const lower = w.toLowerCase();
     return i === 0 ? lower[0].toUpperCase() + lower.slice(1) : lower;
   }).join(' ');
+}
+
+/** "10:00:00" -> "10:00"; null -> '' (so callers can drop missing times). */
+export function formatTime(value) {
+  const m = /^(\d{2}):(\d{2})/.exec(value || '');
+  return m ? `${m[1]}:${m[2]}` : '';
+}
+
+/** The URL if it is an absolute http(s) link, otherwise null (never render javascript:, data: etc. as a link). */
+export function safeHttpUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value).trim());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
 }
