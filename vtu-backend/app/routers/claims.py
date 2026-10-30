@@ -7,7 +7,8 @@ from app.db import get_db, write_transaction
 from app.deps import get_current_user
 from app.models import Event, PointLedger, PointRequest, RequestStatus, RequestType, Role, Student, UserAccount
 from app.permissions import not_found, request_scope, require_roles
-from app.schemas import ClubReviewIn, DeanReviewIn, RequestIn, RequestOut
+from app.schemas import AttachDocumentIn, ClubReviewIn, DeanReviewIn, RequestDocumentOut, RequestIn, RequestOut
+from app.services import documents as docs
 from app.services import request_workflow as wf
 
 router = APIRouter(prefix="/requests", tags=["requests"])
@@ -86,3 +87,12 @@ def dean_review(request_id: int, body: DeanReviewIn, request: Request,
     with write_transaction(db):
         wf.dean_review(db, user, request_id, body.action, body.comment, request)
     return _load(db, user, request_id)
+
+
+@router.post("/{request_id}/documents", response_model=RequestDocumentOut, status_code=201)
+def attach_document(request_id: int, body: AttachDocumentIn, request: Request,
+                    user: UserAccount = Depends(require_roles(Role.STUDENT)), db: Session = Depends(get_db)):
+    """The requesting student attaches one of their own documents while the request is pending."""
+    with write_transaction(db):
+        link = docs.attach_to_request(db, user, request_id, body.document_id, request)
+    return RequestDocumentOut(request_id=link.request_id, document_id=link.document_id, attached_at=link.attached_at)

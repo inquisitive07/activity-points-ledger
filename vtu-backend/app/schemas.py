@@ -237,3 +237,44 @@ class RequestOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     ledger_id: int | None = None          # the award this request produced, once APPROVED
+
+
+# --- documents ------------------------------------------------------------------------------------------------------
+# storage_key is deliberately absent from every document schema: clients never see where a file is stored.
+
+class DocumentOut(BaseModel):
+    document_id: int
+    event_id: int | None
+    event_name: str | None
+    document_type: str
+    file_name: str
+    mime_type: str
+    file_size_bytes: int
+    file_hash: str
+    uploaded_by: str
+    uploaded_at: datetime
+    document_status: str
+
+
+class DocumentDetailOut(DocumentOut):
+    """Links are filtered by the caller's own request/award scope (a shared signed list shows only your awards)."""
+    request_ids: list[int]
+    ledger_ids: list[int]
+
+
+class AttachDocumentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document_id: int
+
+
+class RequestDocumentOut(BaseModel):
+    request_id: int
+    document_id: int
+    attached_at: datetime
+
+
+class LedgerDocumentOut(BaseModel):
+    ledger_id: int
+    document_id: int
+    linked_at: datetime
+    linked_by: str
