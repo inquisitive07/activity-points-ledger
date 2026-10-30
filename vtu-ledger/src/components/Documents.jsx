@@ -6,7 +6,7 @@ import { useToast } from '../context/ToastContext.jsx';
 import { formatBytes, formatDateTime, statusLabel } from '../utils/format.js';
 import { Badge, ErrorState, Loading, Table, row, GHOST } from './ui.jsx';
 
-const PREVIEWABLE = ['application/pdf', 'image/jpeg', 'image/png'];
+export const PREVIEWABLE = ['application/pdf', 'image/jpeg', 'image/png'];
 
 /**
  * Documents visible to the caller for a filter (GET /documents?request_id= | event_id= ...), with authenticated

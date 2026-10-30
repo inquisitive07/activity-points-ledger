@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Download } from 'lucide-react';
+import { Download, Eye } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import { api, downloadDocument } from '../api/client.js';
@@ -9,6 +9,7 @@ import { useApi } from '../hooks/useApi.js';
 import { formatBytes, formatDate, formatDateTime, formatPoints, formatTime, safeHttpUrl, statusLabel } from '../utils/format.js';
 import { Page, Card, Field, Badge, Table, row, FileAttachments, AttachmentResults, Loading, ErrorState, BTN, GHOST, INPUT } from '../components/ui.jsx';
 import { LedgerTable, PointsProgress } from '../components/Ledger.jsx';
+import { DocumentPreview, PREVIEWABLE } from '../components/Documents.jsx';
 
 /** Event statuses that accept new requests (CLAUDE.md 18.5); CLOSED is view-only, DRAFT is never shown. */
 const ACCEPTS_REQUESTS = ['PUBLISHED', 'COMPLETED'];
@@ -331,6 +332,7 @@ export function Vault() {
   const { data, error, loading, reload } = useApi(
     ({ signal }) => api.get('/documents', { signal, query: { document_type: type, status } }), [type, status]);
   const [downloading, setDownloading] = useState(null);
+  const [preview, setPreview] = useState(null);
   const list = (data || []).filter((d) => `${d.file_name} ${d.event_name || ''}`.toLowerCase().includes(q.trim().toLowerCase()));
 
   const download = async (d) => {
@@ -364,11 +366,17 @@ export function Vault() {
               <span className="text-xs whitespace-nowrap">{formatDateTime(d.uploaded_at)}</span>,
               <span className="whitespace-nowrap">{formatBytes(d.file_size_bytes)}</span>,
               <Badge s={d.document_status} />,
-              <button className={`${GHOST} flex items-center gap-1`} disabled={downloading === d.document_id} onClick={() => download(d)} aria-label={`Download ${d.file_name}`}>
-                <Download size={14} />{downloading === d.document_id ? 'Downloading…' : 'Download'}
-              </button>,
+              <div className="flex gap-1">
+                {PREVIEWABLE.includes(d.mime_type) && (
+                  <button className={`${GHOST} flex items-center gap-1`} onClick={() => setPreview(preview?.document_id === d.document_id ? null : d)} aria-label={`Preview ${d.file_name}`}><Eye size={14} />View</button>
+                )}
+                <button className={`${GHOST} flex items-center gap-1`} disabled={downloading === d.document_id} onClick={() => download(d)} aria-label={`Download ${d.file_name}`}>
+                  <Download size={14} />{downloading === d.document_id ? 'Downloading…' : 'Download'}
+                </button>
+              </div>,
             ]))} />
         )}
+        {preview && <DocumentPreview key={preview.document_id} doc={preview} onClose={() => setPreview(null)} />}
       </Card>
     </Page>
   );
