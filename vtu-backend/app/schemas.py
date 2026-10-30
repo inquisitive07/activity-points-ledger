@@ -278,3 +278,78 @@ class LedgerDocumentOut(BaseModel):
     document_id: int
     linked_at: datetime
     linked_by: str
+
+
+# --- OCR ------------------------------------------------------------------------------------------------------------
+
+class OcrBatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document_id: int
+
+
+class OcrBatchOut(BaseModel):
+    ocr_batch_id: int
+    document_id: int
+    file_name: str
+    event_id: int | None
+    event_name: str | None
+    started_by: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    pages_processed: int | None
+    records_detected: int | None          # as extracted; record_counts below reflects the Dean's review so far
+    valid_records: int | None
+    exception_count: int | None
+    extracted_metadata: dict | None
+    error_message: str | None
+    record_counts: dict[str, int]         # current number of records per validation_status
+
+
+class OcrRecordOut(BaseModel):
+    ocr_record_id: int
+    ocr_batch_id: int
+    page_number: int
+    row_number: int | None
+    extracted_usn: str | None
+    matched_student_usn: str | None
+    matched_student_name: str | None
+    extracted_name: str | None
+    extracted_points: Decimal | None
+    confidence_score: Decimal | None
+    raw_extraction: dict | None
+    validation_status: str
+    validation_message: str | None
+
+
+class OcrRecordPatch(BaseModel):
+    """Dean corrections. extracted_usn and raw_extraction keep what OCR read and cannot be changed (CLAUDE.md 18.5).
+    Send only the fields to change; matched_student_usn may be null to clear the selection."""
+    model_config = ConfigDict(extra="forbid")
+    matched_student_usn: str | None = Field(default=None, max_length=20)
+    extracted_name: str | None = Field(default=None, min_length=1, max_length=150)
+    extracted_points: Points | None = None
+
+    @field_validator("matched_student_usn", "extracted_name", mode="before")
+    @classmethod
+    def strip(cls, v):
+        return _clean(v)
+
+    @model_validator(mode="after")
+    def something_to_change(self):
+        if not self.model_fields_set:
+            raise ValueError("Send at least one of matched_student_usn, extracted_name, extracted_points")
+        for name in ("extracted_name", "extracted_points"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be cleared")
+        return self
+
+
+class OcrReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("comment", mode="before")
+    @classmethod
+    def strip(cls, v):
+        return _clean(v)

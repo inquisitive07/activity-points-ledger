@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.bodylimit import BodySizeLimit
 from app.config import settings
 from app.db import get_db
-from app.routers import auth, claims, documents, events, ledger, students
+from app.routers import auth, claims, documents, events, ledger, ocr, students
 
 if settings.jwt_secret == "change-me-in-production" or len(settings.jwt_secret) < 32:
     logging.getLogger("app").warning("JWT_SECRET is the default or shorter than 32 characters; "
@@ -25,6 +25,7 @@ app.include_router(events.router)
 app.include_router(claims.router)
 app.include_router(documents.router)
 app.include_router(ledger.router)
+app.include_router(ocr.router)
 
 
 @app.get("/health")
