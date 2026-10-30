@@ -1,11 +1,12 @@
 """Point requests. Routers stay thin: rules, transitions and locking live in app/services/request_workflow.py."""
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, write_transaction
 from app.deps import get_current_user
-from app.models import Event, PointLedger, PointRequest, RequestStatus, RequestType, Role, Student, UserAccount
+from app.models import (Document, DocumentStatus, Event, PointLedger, PointRequest, PointRequestDocument,
+                        RequestStatus, RequestType, Role, Student, UserAccount)
 from app.permissions import not_found, request_scope, require_roles
 from app.schemas import AttachDocumentIn, ClubReviewIn, DeanReviewIn, RequestDocumentOut, RequestIn, RequestOut
 from app.services import documents as docs
@@ -15,20 +16,26 @@ router = APIRouter(prefix="/requests", tags=["requests"])
 
 _award_of = (select(PointLedger.ledger_id).where(PointLedger.source_request_id == PointRequest.request_id)
              .order_by(PointLedger.ledger_id.desc()).limit(1).scalar_subquery())
+# Same set as GET /documents?request_id= (soft-deleted documents are left out; everyone who sees the request sees
+# its attachments through document_scope).
+_document_count = (select(func.count()).select_from(PointRequestDocument)
+                   .join(Document, Document.document_id == PointRequestDocument.document_id)
+                   .where(PointRequestDocument.request_id == PointRequest.request_id,
+                          Document.document_status != DocumentStatus.DELETED).scalar_subquery())
 
 
 def _rows(user: UserAccount):
-    return (select(PointRequest, Student.name, Event.event_name, Event.club_id, _award_of)
+    return (select(PointRequest, Student.name, Event.event_name, Event.club_id, _award_of, _document_count)
             .join(Student, Student.usn == PointRequest.usn).join(Event, Event.event_id == PointRequest.event_id)
             .where(request_scope(user)))
 
 
 def _out(row) -> RequestOut:
-    req, student_name, event_name, club_id, ledger_id = row
+    req, student_name, event_name, club_id, ledger_id, document_count = row
     fields = {f: getattr(req, f) for f in RequestOut.model_fields
-              if f not in ("student_name", "event_name", "club_id", "ledger_id")}
+              if f not in ("student_name", "event_name", "club_id", "ledger_id", "document_count")}
     return RequestOut(**fields, student_name=student_name, event_name=event_name, club_id=club_id,
-                      ledger_id=ledger_id)
+                      ledger_id=ledger_id, document_count=document_count)
 
 
 def _load(db: Session, user: UserAccount, request_id: int) -> RequestOut:

@@ -45,10 +45,13 @@ class FakeExtractor(Extractor):
 
     def __init__(self):
         self.rows, self.title, self.error, self.calls = good_rows(), CLOUD_TITLE, None, 0
+        self.during = None                  # optional callback run mid-extraction (simulates concurrent actions)
 
     def extract(self, data, mime_type):
         self.calls += 1
         assert data.startswith(b"%PDF-") and mime_type == "application/pdf"     # bytes came through storage
+        if self.during:
+            self.during()
         if self.error:
             raise self.error
         for i, r in enumerate(self.rows, 1):
@@ -926,11 +929,16 @@ def test_refused_when_an_active_award_appeared_after_confirmation(api, as_, db, 
 
 
 @pytest.mark.parametrize("status", ["GRADUATED", "INACTIVE", "ARCHIVED"])
-def test_student_eligibility_is_rechecked_at_commit(api, as_, db, fake, status):
+def test_bulk_awards_follow_the_individual_approval_eligibility(api, as_, db, fake, status):
+    """CP6 alignment. An individual Dean approval is not limited by student_status (test_workflow:
+    test_existing_requests_stay_reviewable_and_withdrawable_after_status_change); only submitting a new request is.
+    A bulk commit follows the same rule, so a status change after confirmation does not block the award."""
     b, _ = reviewed(api, as_, db, fake, good_rows())
     db.execute(Student.__table__.update().where(Student.usn == KARTHIK).values(student_status=status))
     db.commit()
-    refused(api, as_, db, b["ocr_batch_id"], 409, f"{KARTHIK} is {status}; only ACTIVE students can receive awards")
+    out = commit(api, as_, b["ocr_batch_id"])
+    assert out["awards_created"] == 3
+    assert {a.usn for a in ledger_of(db, b["ocr_batch_id"])} == {NEHA, ISHITA, KARTHIK}
 
 
 def test_refused_for_a_draft_event(api, as_, db, fake):
@@ -1186,3 +1194,216 @@ def test_award_racing_the_commit_is_caught_by_the_unique_index(db_engine, scenar
             AuditLog.entity_type == "ocr_batch", AuditLog.entity_id == scenario["batch"])) == 0
         assert s.scalar(select(func.count()).select_from(AuditLog).where(
             AuditLog.entity_type == "point_request", AuditLog.entity_id == scenario["request"])) == 0
+
+
+# --- CP6: frontend integration (eligibility warning, issue codes, confirm-valid, stalled-batch recovery) ----------
+
+from datetime import datetime, timedelta, timezone                 # noqa: E402
+
+from app.ocr.validation import issue_codes                         # noqa: E402
+
+DIYA_USN = "1RV22IS014"
+
+
+def set_status(db, usn, status):
+    db.execute(Student.__table__.update().where(Student.usn == usn).values(student_status=status))
+    db.commit()
+
+
+@pytest.mark.parametrize("status", ["GRADUATED", "INACTIVE", "ARCHIVED"])
+def test_non_active_student_rows_need_an_explicit_confirmation(api, as_, db, fake, status):
+    """Not a block (see the eligibility test above) but an EXCEPTION, so confirm-valid never accepts it silently."""
+    set_status(db, KARTHIK, status)
+    fake.rows = good_rows()
+    b, recs = run(api, as_, db)
+    karthik = by_usn(recs, KARTHIK)
+    assert karthik["validation_status"] == "EXCEPTION" and karthik["issues"] == ["STUDENT_NOT_ACTIVE"]
+    assert f"{KARTHIK} is {status}, not ACTIVE" in karthik["validation_message"]
+    assert b["issue_counts"] == {"STUDENT_NOT_ACTIVE": 1}
+    r = api.post(f"/ocr/batches/{b['ocr_batch_id']}/confirm-valid", headers=as_(DEAN))
+    assert r.status_code == 200 and r.json()["records_confirmed"] == 2
+    assert by_usn(records(api, as_, b["ocr_batch_id"]), KARTHIK)["validation_status"] == "EXCEPTION"
+    assert api.post(f"/ocr/records/{karthik['ocr_record_id']}/confirm", headers=as_(DEAN)).status_code == 200
+    assert commit(api, as_, b["ocr_batch_id"])["awards_created"] == 3
+
+
+def test_issue_codes_classify_every_validation_problem(api, as_, db, fake):
+    fake.rows = [row("1RV22CS999", "Unknown Person"), row("ABC12", "Bad Format"), row(None, "No Usn"),
+                 row(DIYA_USN, "Diya Nairr"), row(ISHITA, "Ishita Rao", points=""),
+                 row(KARTHIK, "Karthik Bhat", points="ten"), row(AARAV_USN, "Aarav Sharma", confidence=0.5),
+                 row(NEHA, "Neha Patil"), row(NEHA, "Neha Patil")]
+    b, recs = run(api, as_, db)
+    codes = {(r["extracted_usn"], r["extracted_name"]): r["issues"] for r in recs}
+    assert codes[("1RV22CS999", "Unknown Person")] == ["UNKNOWN_USN"]
+    assert codes[("ABC12", "Bad Format")] == ["INVALID_USN"]
+    assert codes[(None, "No Usn")] == ["MISSING_USN"]
+    assert codes[(DIYA_USN, "Diya Nairr")] == ["NAME_MISMATCH"]
+    assert codes[(ISHITA, "Ishita Rao")] == ["MISSING_POINTS"]
+    assert codes[(KARTHIK, "Karthik Bhat")] == ["INVALID_POINTS"]
+    assert codes[(AARAV_USN, "Aarav Sharma")] == ["UNMATCHED_LOW_CONFIDENCE", "LOW_CONFIDENCE"]
+    assert codes[(NEHA, "Neha Patil")] == ["DUPLICATE_ROW"]
+    assert all(r["issues"] and "OTHER" not in r["issues"] for r in recs)
+    assert b["issue_counts"] == {"DUPLICATE_ROW": 2, "INVALID_POINTS": 1, "INVALID_USN": 1, "LOW_CONFIDENCE": 1,
+                                 "MISSING_POINTS": 1, "MISSING_USN": 1, "NAME_MISMATCH": 1, "UNKNOWN_USN": 1,
+                                 "UNMATCHED_LOW_CONFIDENCE": 1}
+
+
+def test_issue_codes_for_batch_problems_and_unrecognised_text():
+    assert issue_codes(None) == [] and issue_codes("") == []
+    # A batch problem contains "; " itself; its continuation is not a separate issue.
+    assert issue_codes("Name mismatch: x; Unmatched event: not tagged; the document text names 'A' (2026-27, id 1)") \
+        == ["NAME_MISMATCH", "UNMATCHED_EVENT"]
+    assert issue_codes("Event mismatch: a; Club mismatch: b") == ["EVENT_MISMATCH", "CLUB_MISMATCH"]
+    assert issue_codes("Student already has an ACTIVE award for this event") == ["OTHER"]      # seeded wording
+
+
+def test_confirm_valid_confirms_only_currently_valid_records(api, as_, db, fake):
+    fake.rows = good_rows() + [row("1RV22CS999", "Unknown Person", number=4)]
+    b, _ = run(api, as_, db)
+    bid, start_audit = b["ocr_batch_id"], db.scalar(select(func.max(AuditLog.audit_id)))
+    # Neha is awarded by another path after extraction: re-validation inside confirm-valid must catch it.
+    db.add(PointLedger(usn=NEHA, event_id=event_id(db, CLOUD), points_awarded=Decimal(5),
+                       award_date=func.current_date(), source_type="BULK_APPROVAL",
+                       source_ocr_batch_id=db.scalar(select(OcrBatch.ocr_batch_id).where(OcrBatch.status == "COMMITTED")),
+                       approved_by=DEAN, approved_at=func.now(), status="ACTIVE"))
+    db.commit()
+    before = official_state(db)
+    r = api.post(f"/ocr/batches/{bid}/confirm-valid", headers=as_(DEAN), json={"comment": "Clean rows."})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    recs = records(api, as_, bid)
+    assert out["records_confirmed"] == 2 and set(out["confirmed_record_ids"]) == {
+        by_usn(recs, ISHITA)["ocr_record_id"], by_usn(recs, KARTHIK)["ocr_record_id"]}
+    assert by_usn(recs, NEHA)["validation_status"] == "EXCEPTION"
+    assert by_usn(recs, NEHA)["issues"] == ["POSSIBLE_DUPLICATE_AWARD"]
+    assert by_usn(recs, "1RV22CS999")["validation_status"] == "EXCEPTION"
+    assert out["batch"]["record_counts"] == {"VALID": 0, "EXCEPTION": 2, "CONFIRMED": 2, "DISMISSED": 0}
+    assert official_state(db) == before                       # confirmation is never an award
+    per_record = [a for a in audits(db, "OCR_RECORD_CONFIRMED") if a.audit_id > start_audit]
+    assert len(per_record) == 2 and all(a.new_values["confirmed_with"] == "confirm-valid" for a in per_record)
+    [batch_entry] = audits(db, "OCR_BATCH_VALID_CONFIRMED", bid)
+    assert batch_entry.new_values["comment"] == "Clean rows."
+    assert batch_entry.new_values["revalidated_records"] == [
+        {"ocr_record_id": by_usn(recs, NEHA)["ocr_record_id"], "old": "VALID", "new": "EXCEPTION"}]
+    # Nothing VALID is left: a second call confirms nothing and changes nothing.
+    again = api.post(f"/ocr/batches/{bid}/confirm-valid", headers=as_(DEAN)).json()
+    assert again["records_confirmed"] == 0 and again["confirmed_record_ids"] == []
+
+
+def test_confirm_valid_rules(api, as_, db, fake):
+    fake.rows = good_rows()
+    b, _ = run(api, as_, db)
+    bid = b["ocr_batch_id"]
+    for email in (HOD, AARAV, ROBOTICS):
+        assert api.post(f"/ocr/batches/{bid}/confirm-valid", headers=as_(email)).status_code == 403
+    assert api.post("/ocr/batches/999999/confirm-valid", headers=as_(DEAN)).status_code == 404
+    assert api.post(f"/ocr/batches/{bid}/confirm-valid", headers=as_(DEAN)).json()["records_confirmed"] == 3
+    commit(api, as_, bid)
+    r = api.post(f"/ocr/batches/{bid}/confirm-valid", headers=as_(DEAN))
+    assert r.status_code == 409 and "is COMMITTED" in r.json()["detail"]
+
+
+# Stalled batches. TestClient runs background tasks before it returns, so a lost run is simulated by writing the
+# batch row directly, exactly as a crashed process leaves it: QUEUED or PROCESSING, no records.
+
+def stalled(db, document_id, status="PROCESSING", minutes_ago=120) -> int:
+    started = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    batch = OcrBatch(document_id=document_id, started_by=DEAN, status=status, started_at=started)
+    db.add(batch)
+    db.commit()
+    return batch.ocr_batch_id
+
+
+def mark_failed(api, as_, batch_id, email=DEAN):
+    return api.post(f"/ocr/batches/{batch_id}/mark-failed", headers=as_(email))
+
+
+@pytest.mark.parametrize("status", ["QUEUED", "PROCESSING"])
+def test_a_stalled_batch_can_be_marked_failed_and_retried_once(api, as_, db, fake, status):
+    doc = signed_list(api, as_, db)
+    bid = stalled(db, doc, status)
+    assert "is still running" in start(api, as_, doc, expect=409)["detail"]      # the document is blocked
+    before = official_state(db)
+    r = mark_failed(api, as_, bid)
+    assert r.status_code == 200, r.text
+    failed = r.json()
+    assert failed["status"] == "FAILED" and failed["completed_at"] and "No records were created" in failed["error_message"]
+    assert records(api, as_, bid) == [] and official_state(db) == before
+    [entry] = audits(db, "OCR_BATCH_MARKED_FAILED", bid)
+    assert entry.old_values["status"] == status and entry.new_values["status"] == "FAILED"
+    assert mark_failed(api, as_, bid).status_code == 409                          # FAILED is not in flight
+    # Recovery never reprocesses by itself: the Dean retries, which creates a new batch.
+    assert fake.calls == 0
+    retry = api.post(f"/ocr/batches/{bid}/retry", headers=as_(DEAN))
+    assert retry.status_code == 202, retry.text
+    new_id = retry.json()["ocr_batch_id"]
+    assert batch(api, as_, new_id)["status"] == "REVIEW" and fake.calls == 1
+    assert api.post(f"/ocr/batches/{new_id}/confirm-valid", headers=as_(DEAN)).json()["records_confirmed"] == 3
+    assert commit(api, as_, new_id)["awards_created"] == 3
+    assert ledger_of(db, bid) == [] and len(ledger_of(db, new_id)) == 3
+    assert api.post(f"/ocr/batches/{bid}/retry", headers=as_(DEAN)).status_code == 409   # retried once only
+
+
+def test_a_recent_batch_cannot_be_marked_failed(api, as_, db, fake):
+    from app.config import settings
+    doc = signed_list(api, as_, db)
+    bid = stalled(db, doc, minutes_ago=settings.ocr_stale_minutes - 1)
+    r = mark_failed(api, as_, bid)
+    assert r.status_code == 409 and "may still be running" in r.json()["detail"]
+    assert batch(api, as_, bid)["status"] == "PROCESSING" and audits(db, "OCR_BATCH_MARKED_FAILED", bid) == []
+
+
+def test_progress_is_measured_from_the_start_of_processing(api, as_, db, fake):
+    """A batch queued long ago that started processing recently is still within its window."""
+    doc = signed_list(api, as_, db)
+    bid = stalled(db, doc, minutes_ago=600)
+    db.add(AuditLog(user_email=DEAN, action="OCR_BATCH_PROCESSING", entity_type="ocr_batch", entity_id=bid))
+    db.commit()
+    assert mark_failed(api, as_, bid).status_code == 409
+
+
+def test_only_in_flight_batches_by_the_dean(api, as_, db, fake):
+    fake.rows = good_rows()
+    b, _ = run(api, as_, db)
+    r = mark_failed(api, as_, b["ocr_batch_id"])
+    assert r.status_code == 409 and "only a QUEUED or PROCESSING batch" in r.json()["detail"]
+    bid = stalled(db, signed_list(api, as_, db))
+    for email in (HOD, AARAV, ROBOTICS):
+        assert mark_failed(api, as_, bid, email).status_code == 403
+    assert mark_failed(api, as_, 999999).status_code == 404
+
+
+def _mark_failed_from_another_session(db, monkeypatch):
+    """What the Dean's mark-failed request does while a run is still extracting (the run looked lost)."""
+    def during():
+        bid = db.scalar(select(func.max(OcrBatch.ocr_batch_id)))
+        monkeypatch.setattr(ocr_svc, "_now", lambda: datetime.now(timezone.utc) + timedelta(days=1))
+        with write_transaction(db):
+            ocr_svc.mark_failed(db, db.get(UserAccount, DEAN), bid)
+        monkeypatch.undo()
+    return during
+
+
+def test_a_run_that_finishes_after_being_marked_failed_is_discarded(api, as_, db, fake, monkeypatch):
+    fake.rows, fake.during = good_rows(), _mark_failed_from_another_session(db, monkeypatch)
+    before = official_state(db)
+    bid = start(api, as_, signed_list(api, as_, db))["ocr_batch_id"]
+    b = batch(api, as_, bid)
+    assert b["status"] == "FAILED" and "No records were created" in b["error_message"]
+    assert records(api, as_, bid) == [] and b["records_detected"] is None
+    assert audits(db, "OCR_BATCH_REVIEW_READY", bid) == [] and official_state(db) == before
+    # The retry is the only run whose records exist.
+    fake.during = None
+    retry = api.post(f"/ocr/batches/{bid}/retry", headers=as_(DEAN))
+    assert retry.status_code == 202, retry.text
+    new_id = retry.json()["ocr_batch_id"]
+    assert batch(api, as_, new_id)["status"] == "REVIEW" and len(records(api, as_, new_id)) == 3
+
+
+def test_a_failure_after_being_marked_failed_keeps_the_recovery_message(api, as_, db, fake, monkeypatch):
+    fake.error = ExtractionError("The document has no table.")
+    fake.during = _mark_failed_from_another_session(db, monkeypatch)
+    bid = start(api, as_, signed_list(api, as_, db))["ocr_batch_id"]
+    b = batch(api, as_, bid)
+    assert b["status"] == "FAILED" and "No records were created" in b["error_message"]
+    assert audits(db, "OCR_BATCH_FAILED", bid) == []                     # the late failure changed nothing

@@ -8,6 +8,11 @@ Runs after the request that created the batch has committed (a FastAPI backgroun
      and write the audit entry. A failure rolls all of it back, so a batch never has a partial set of records;
   4. on any failure: FAILED with a message for the Dean (internal details go to the server log only).
 
+Steps 3 and 4 act only on a batch that is still PROCESSING. If the Dean marked it FAILED in the meantime
+(services/ocr.mark_failed, used when a run looks lost after a crash or restart), a run that finishes late is
+discarded: it writes no records and does not change the batch, so a stalled batch and its retry can never both
+produce records.
+
 Nothing here touches point_ledger or point_request. OCR output is staged for Dean review, never awarded.
 """
 import logging
@@ -26,6 +31,10 @@ log = logging.getLogger("app.ocr")
 BATCH_FIELDS = ("ocr_batch_id", "document_id", "started_by", "status", "started_at", "completed_at",
                 "pages_processed", "records_detected", "valid_records", "exception_count", "error_message")
 UNEXPECTED = "OCR processing failed because of an unexpected server error. The batch can be retried."
+
+
+class NoLongerProcessing(Exception):
+    """The batch left PROCESSING while it was being extracted (it was marked FAILED); the result is discarded."""
 
 
 def _now() -> datetime:
@@ -68,6 +77,9 @@ def process_batch(batch_id: int, open_session, extractor: Extractor, storage: St
                 raise ExtractionError("No participant rows were found in the document.")
             _store(db, batch_id, doc, extraction, extractor.name)
             db.commit()
+        except NoLongerProcessing:
+            db.rollback()
+            log.warning("OCR batch %s is no longer PROCESSING; its late result was discarded", batch_id)
         except ExtractionError as exc:
             db.rollback()
             _fail(db, batch_id, str(exc))
@@ -77,8 +89,17 @@ def process_batch(batch_id: int, open_session, extractor: Extractor, storage: St
             _fail(db, batch_id, UNEXPECTED)
 
 
+def _locked(db, batch_id: int) -> OcrBatch:
+    """The batch row, locked and re-read from the database. populate_existing matters: the session keeps objects
+    across commits (expire_on_commit=False), and the status may have been changed by another session meanwhile."""
+    return db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update()
+                     .execution_options(populate_existing=True))
+
+
 def _store(db, batch_id: int, doc: Document, extraction: Extraction, engine: str) -> None:
-    batch = db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update())
+    batch = _locked(db, batch_id)
+    if batch.status != OcrBatchStatus.PROCESSING:
+        raise NoLongerProcessing(batch_id)
     event = db.get(Event, doc.event_id) if doc.event_id is not None else None
     report, batch_problems = check_event(db, event, extraction.title_text)
 
@@ -116,7 +137,11 @@ def _store(db, batch_id: int, doc: Document, extraction: Extraction, engine: str
 
 def _fail(db, batch_id: int, message: str) -> None:
     try:
-        batch = db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update())
+        batch = _locked(db, batch_id)
+        if batch.status != OcrBatchStatus.PROCESSING:        # already marked FAILED: keep that message
+            log.warning("OCR batch %s is %s; not overwriting it with this failure", batch_id, batch.status)
+            db.rollback()
+            return
         old = snapshot(batch, "status", "error_message")
         batch.status = OcrBatchStatus.FAILED
         batch.error_message = message

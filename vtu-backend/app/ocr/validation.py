@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import (Club, Event, LedgerStatus, OcrRecord, PointLedger, Student, ValidationStatus)
+from app.models import (Club, Event, LedgerStatus, OcrRecord, PointLedger, Student, StudentStatus, ValidationStatus)
 
 USN_PATTERN = re.compile(r"1RV\d{2}[A-Z]{2}\d{3}")
 USN_EXAMPLE = "1RV22CS001"
@@ -26,6 +26,41 @@ LOW_CONFIDENCE = Decimal("0.90")
 MAX_POINTS = Decimal("9999.99")                     # NUMERIC(6,2)
 _POINTS = re.compile(r"\d+(\.\d+)?")
 OPEN = (ValidationStatus.VALID, ValidationStatus.EXCEPTION)
+
+# Issue codes for the frontend's exception counters. Every problem sentence written below starts with one of these
+# prefixes, and validation_message joins the sentences with "; ", so the codes are derived from the stored message
+# (no extra column). A fragment that starts with no known prefix continues the previous sentence; a message whose
+# first sentence matches nothing (for example older seeded text) is OTHER.
+ISSUE_PREFIXES = (
+    ("Unexpected row structure", "UNEXPECTED_STRUCTURE"),
+    ("Selected student", "SELECTED_STUDENT_DIFFERS"),
+    ("Missing USN", "MISSING_USN"),
+    ("Invalid USN format", "INVALID_USN"),
+    ("USN ", "UNMATCHED_LOW_CONFIDENCE"),
+    ("Unknown USN", "UNKNOWN_USN"),
+    ("Missing name", "MISSING_NAME"),
+    ("Name mismatch", "NAME_MISMATCH"),
+    ("Student status", "STUDENT_NOT_ACTIVE"),
+    ("Missing points", "MISSING_POINTS"),
+    ("Invalid points", "INVALID_POINTS"),
+    ("Low OCR confidence", "LOW_CONFIDENCE"),
+    ("Duplicate row", "DUPLICATE_ROW"),
+    ("Possible duplicate award", "POSSIBLE_DUPLICATE_AWARD"),
+    ("Unmatched event", "UNMATCHED_EVENT"),
+    ("Event mismatch", "EVENT_MISMATCH"),
+    ("Club mismatch", "CLUB_MISMATCH"),
+)
+
+
+def issue_codes(message: str | None) -> list[str]:
+    codes = []
+    for i, fragment in enumerate((message or "").split("; ")):
+        code = next((c for prefix, c in ISSUE_PREFIXES if fragment.startswith(prefix)), None)
+        if code is None and i == 0 and fragment:
+            code = "OTHER"
+        if code and code not in codes:
+            codes.append(code)
+    return codes
 
 
 # --- values -----------------------------------------------------------------------------------------------------
@@ -202,6 +237,11 @@ def record_problems(r: OcrRecord, students: dict, awarded: set, event: Event | N
     elif student is not None and not names_match(r.extracted_name, student.name):
         problems.append(f"Name mismatch: the list says '{r.extracted_name}', the student record says "
                         f"'{student.name}'")
+    # A warning, not a block: awards follow the same eligibility as an individual Dean approval, which does not
+    # depend on student_status (only submitting a new request does). The Dean must confirm such a row explicitly.
+    if student is not None and student.student_status != StudentStatus.ACTIVE:
+        problems.append(f"Student status: {matched} is {student.student_status}, not ACTIVE; confirm only if the "
+                        f"signed list really awards this student")
 
     if r.extracted_points is None:
         raw_points = (raw.get("points") or "").strip()

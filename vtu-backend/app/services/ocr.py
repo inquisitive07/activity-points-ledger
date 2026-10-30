@@ -4,6 +4,10 @@ Functions flush but never commit: routers wrap them in db.write_transaction, so 
 committed together. Processing itself runs in the background (app/ocr/pipeline.py).
 
 Batch states:   QUEUED -> PROCESSING -> REVIEW | FAILED;  REVIEW -> COMMITTED (commit_batch, below).
+  * Recovery: a QUEUED or PROCESSING batch with no result after settings.ocr_stale_minutes (its background run
+    was lost, e.g. the API restarted) can be marked FAILED by the Dean (mark_failed), and then retried. Such a
+    batch has no records (records are written in the same transaction that sets REVIEW), and a run that finishes
+    late is discarded by the pipeline, so recovery can neither duplicate records nor create awards.
   * A document can be processed again: every run is a new batch, earlier batches are never overwritten.
   * While a batch of the document is QUEUED or PROCESSING, no new batch is started for it.
   * Retry: a FAILED batch stays as it is (with its error message); retrying creates a new batch for the same
@@ -20,7 +24,7 @@ duplicate on another. Status changes caused that way are listed in the action's 
 Only commit_batch writes to point_ledger and point_request, and only from CONFIRMED records of a fully reviewed
 batch. Extraction and review never award points.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, Request
@@ -28,9 +32,10 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.audit import audit, snapshot
-from app.models import (Document, DocumentStatus, DocumentType, Event, EventStatus, LedgerSourceType, LedgerStatus,
-                        OcrBatch, OcrBatchStatus, OcrRecord, PointLedger, PointLedgerDocument, PointRequest,
-                        RequestType, Role, Student, UserAccount, ValidationStatus)
+from app.config import settings
+from app.models import (AuditLog, Document, DocumentStatus, DocumentType, Event, EventStatus, LedgerSourceType,
+                        LedgerStatus, OcrBatch, OcrBatchStatus, OcrRecord, PointLedger, PointLedgerDocument,
+                        PointRequest, RequestType, Role, Student, UserAccount, ValidationStatus)
 from app.ocr.pipeline import BATCH_FIELDS
 from app.ocr.validation import MAX_POINTS, OPEN, normalize_usn, validate_records
 from app.permissions import not_found
@@ -98,6 +103,43 @@ def retry_batch(db: Session, user: UserAccount, batch_id: int, request: Request 
     audit(db, user.email, "OCR_BATCH_RETRIED", "ocr_batch", batch.ocr_batch_id,
           new_values={**snapshot(batch, *BATCH_FIELDS), "retry_of_batch_id": failed.ocr_batch_id,
                       "failed_error_message": failed.error_message}, request=request)
+    return batch
+
+
+STALLED_MESSAGE = ("Processing did not finish (the background run was lost, for example because the API was "
+                   "restarted). No records were created; the batch can be retried.")
+
+
+def mark_failed(db: Session, user: UserAccount, batch_id: int, request: Request | None = None) -> OcrBatch:
+    """Recovery for a batch whose background run was lost: QUEUED | PROCESSING -> FAILED, only after
+    settings.ocr_stale_minutes without progress. It never reprocesses anything; the Dean retries the FAILED batch
+    afterwards (retry_batch). The pipeline discards a run that completes after this, so nothing is duplicated."""
+    _require_dean(user)
+    batch = db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update())
+    if batch is None:
+        raise not_found("OCR batch")
+    if batch.status not in IN_FLIGHT:
+        raise HTTPException(409, f"Batch {batch_id} is {batch.status}; only a QUEUED or PROCESSING batch can be "
+                                 f"marked failed")
+    # Progress = when processing started (its audit entry), else when the batch was queued.
+    processing_since = db.scalar(select(func.max(AuditLog.created_at)).where(
+        AuditLog.entity_type == "ocr_batch", AuditLog.entity_id == batch_id,
+        AuditLog.action == "OCR_BATCH_PROCESSING"))
+    last_progress = max(filter(None, (batch.started_at, processing_since)))
+    stale_after = timedelta(minutes=settings.ocr_stale_minutes)
+    if _now() - last_progress < stale_after:
+        raise HTTPException(409, f"Batch {batch_id} is {batch.status} and may still be running; it can be marked "
+                                 f"failed {settings.ocr_stale_minutes} minutes after its last progress")
+    if db.scalar(select(exists().where(OcrRecord.ocr_batch_id == batch_id))):     # cannot happen; never guess
+        raise HTTPException(409, f"Batch {batch_id} already has records; it cannot be marked failed")
+    old = snapshot(batch, "status", "error_message", "completed_at")
+    batch.status = OcrBatchStatus.FAILED
+    batch.error_message = STALLED_MESSAGE
+    batch.completed_at = _now()
+    db.flush()
+    audit(db, user.email, "OCR_BATCH_MARKED_FAILED", "ocr_batch", batch_id, old_values=old,
+          new_values={**snapshot(batch, "status", "error_message", "completed_at"),
+                      "stale_minutes": settings.ocr_stale_minutes}, request=request)
     return batch
 
 
@@ -231,6 +273,44 @@ def reopen(db: Session, user: UserAccount, record_id: int, comment: str | None,
     return record
 
 
+def confirm_valid(db: Session, user: UserAccount, batch_id: int, comment: str | None,
+                  request: Request | None = None) -> list[OcrRecord]:
+    """Confirm every record that is VALID now, in one transaction (the Dean's "accept all clean rows"). The batch's
+    open records are re-validated first, under the batch lock, so a record that stopped being valid in the meantime
+    (for example an individual approval has just awarded that student) stays open. EXCEPTION records are never
+    confirmed here: each one needs its own decision. Each confirmation gets its own audit entry. Not an award."""
+    _require_dean(user)
+    batch = db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update())
+    if batch is None:
+        raise not_found("OCR batch")
+    if batch.status != OcrBatchStatus.REVIEW:
+        raise HTTPException(409, f"Batch {batch_id} is {batch.status}; records can be reviewed only while it is "
+                                 f"in REVIEW")
+    revalidated = _revalidate(db, batch, exclude=0)
+    event = _event_of(db, batch)
+    valid = list(db.scalars(select(OcrRecord).where(OcrRecord.ocr_batch_id == batch_id,
+                                                    OcrRecord.validation_status == V.VALID)
+                            .order_by(OcrRecord.page_number, OcrRecord.row_number, OcrRecord.ocr_record_id)
+                            .with_for_update()))
+    for record in valid:
+        # VALID already implies all of this; checked again because confirmation must never rest on stale state.
+        if event is None or record.matched_student_usn is None or record.extracted_points is None:
+            raise HTTPException(409, f"Record {record.ocr_record_id} cannot be confirmed; nothing was confirmed")
+        old = snapshot(record, *RECORD_FIELDS)
+        record.validation_status = V.CONFIRMED
+        db.flush()
+        _audit_review(db, user, "OCR_RECORD_CONFIRMED", record, old, None, request, comment=comment,
+                      confirmed_with="confirm-valid")
+    others = _revalidate(db, batch, exclude=0)
+    if others:              # confirming VALID rows cannot change other rows; refuse rather than hide it if it did
+        raise HTTPException(409, "Confirming the valid records changed other records; nothing was confirmed. "
+                                 "Reload the batch and review it again")
+    audit(db, user.email, "OCR_BATCH_VALID_CONFIRMED", "ocr_batch", batch_id,
+          new_values={"confirmed_record_ids": [r.ocr_record_id for r in valid], "comment": comment,
+                      "revalidated_records": revalidated}, request=request)
+    return valid
+
+
 # --- ledger commit (CP5) ----------------------------------------------------------------------------------------
 
 def commit_batch(db: Session, user: UserAccount, batch_id: int, request: Request | None = None) -> dict:
@@ -336,9 +416,9 @@ def _commit_problems(confirmed: list[OcrRecord], students: dict, awarded: set, e
             problems.append(f"{label} has no matched student")
         elif usn not in students:
             problems.append(f"{label}: student {usn} does not exist")
-        elif students[usn].student_status not in wf.MAY_SUBMIT:
-            problems.append(f"{label}: {usn} is {students[usn].student_status}; only ACTIVE students can receive "
-                            f"awards (set the student back to ACTIVE first)")
+        # No student_status check: a bulk award follows the same eligibility as an individual Dean approval, which
+        # is not limited by student_status (only submitting a new request is; request_workflow.MAY_SUBMIT). A
+        # non-ACTIVE student's row is an EXCEPTION during review, so the Dean has confirmed it explicitly.
         points = r.extracted_points
         if points is None:
             problems.append(f"{label} has no points")

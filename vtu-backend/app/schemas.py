@@ -57,6 +57,18 @@ class StudentDetailOut(StudentSummaryOut):
     ledger: list[LedgerRowOut]
 
 
+class StudentStatusIn(BaseModel):
+    """Dean-only lifecycle change. The student record and its history are never deleted."""
+    model_config = ConfigDict(extra="forbid")
+    student_status: Literal["ACTIVE", "GRADUATED", "INACTIVE", "ARCHIVED"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip(cls, v):
+        return (v.strip() or None) if isinstance(v, str) else v
+
+
 
 # --- events ---------------------------------------------------------------------------------------------------------
 # Points columns are NUMERIC(6,2): at most 9999.99, never negative (CLAUDE.md 5; no other range is imposed).
@@ -237,6 +249,7 @@ class RequestOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     ledger_id: int | None = None          # the award this request produced, once APPROVED
+    document_count: int = 0               # attached documents that are not soft-deleted (GET /documents?request_id=)
 
 
 # --- documents ------------------------------------------------------------------------------------------------------
@@ -304,6 +317,7 @@ class OcrBatchOut(BaseModel):
     extracted_metadata: dict | None
     error_message: str | None
     record_counts: dict[str, int]         # current number of records per validation_status
+    issue_counts: dict[str, int]          # EXCEPTION records per issue code (see OcrRecordOut.issues)
 
 
 class OcrRecordOut(BaseModel):
@@ -320,6 +334,7 @@ class OcrRecordOut(BaseModel):
     raw_extraction: dict | None
     validation_status: str
     validation_message: str | None
+    issues: list[str]                     # issue codes derived from validation_message, e.g. UNKNOWN_USN
 
 
 class OcrRecordPatch(BaseModel):
@@ -355,6 +370,13 @@ class OcrReviewIn(BaseModel):
         return _clean(v)
 
 
+class OcrConfirmValidOut(BaseModel):
+    """Result of confirming every VALID record of a batch at once."""
+    batch: OcrBatchOut
+    records_confirmed: int
+    confirmed_record_ids: list[int]
+
+
 class OcrCommitOut(BaseModel):
     """Result of committing a batch to the ledger."""
     batch: OcrBatchOut
@@ -364,3 +386,24 @@ class OcrCommitOut(BaseModel):
     resolved_request_ids: list[int]
     records_confirmed: int
     records_dismissed: int
+
+
+# --- audit log ------------------------------------------------------------------------------------------------------
+
+class AuditOut(BaseModel):
+    audit_id: int
+    user_email: str | None
+    action: str
+    entity_type: str
+    entity_id: int
+    old_values: dict | None
+    new_values: dict | None
+    ip_address: str | None
+    created_at: datetime
+
+
+class AuditPageOut(BaseModel):
+    items: list[AuditOut]
+    total: int                            # rows matching the filters, ignoring limit/offset
+    limit: int
+    offset: int

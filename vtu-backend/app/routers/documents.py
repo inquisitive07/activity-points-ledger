@@ -10,8 +10,8 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import exists, select
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from app.db import get_db, write_transaction
 from app.deps import get_current_user
@@ -52,6 +52,21 @@ def _in_awards(user: UserAccount, ledger_id: int):
                           PointLedger.ledger_id == PointLedgerDocument.ledger_id, ledger_scope(user))
 
 
+def _of_student(user: UserAccount, usn: str):
+    """Documents about one student: uploaded from their account, or backing their requests or awards. Applied on top
+    of document_scope, and the request/award links must be inside the caller's own scopes too, so the filter only
+    narrows the vault: another department's USN gives an empty list, and a signed list shared by many students
+    never reveals which other students it backs."""
+    uploader = aliased(UserAccount)
+    return or_(exists().where(uploader.email == Document.uploaded_by, uploader.student_usn == usn),
+               exists().where(PointRequestDocument.document_id == Document.document_id,
+                              PointRequest.request_id == PointRequestDocument.request_id, PointRequest.usn == usn,
+                              request_scope(user)),
+               exists().where(PointLedgerDocument.document_id == Document.document_id,
+                              PointLedger.ledger_id == PointLedgerDocument.ledger_id, PointLedger.usn == usn,
+                              ledger_scope(user)))
+
+
 @router.post("", response_model=DocumentOut, status_code=201)
 def upload(request: Request, file: UploadFile = File(...), document_type: DocumentType = Form(...),
            event_id: int | None = Form(None), user: UserAccount = Depends(writers), db: Session = Depends(get_db),
@@ -65,10 +80,10 @@ def upload(request: Request, file: UploadFile = File(...), document_type: Docume
 @router.get("", response_model=list[DocumentOut])
 def list_documents(document_type: DocumentType | None = None, event_id: int | None = None,
                    status: DocumentStatus | None = None, request_id: int | None = None,
-                   ledger_id: int | None = None, user: UserAccount = Depends(get_current_user),
-                   db: Session = Depends(get_db)):
+                   ledger_id: int | None = None, usn: str | None = None,
+                   user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     """The caller's vault. Soft-deleted documents are left out unless status=DELETED is asked for (Dean only:
-    nobody else's scope contains them)."""
+    nobody else's scope contains them). usn narrows it to one student's documents (e.g. the HOD inspection view)."""
     stmt = _rows(user).where(Document.document_status == status if status
                              else Document.document_status != DocumentStatus.DELETED)
     if document_type:
@@ -79,6 +94,8 @@ def list_documents(document_type: DocumentType | None = None, event_id: int | No
         stmt = stmt.where(_in_requests(user, request_id))
     if ledger_id is not None:
         stmt = stmt.where(_in_awards(user, ledger_id))
+    if usn and usn.strip():
+        stmt = stmt.where(_of_student(user, usn.strip().upper()))
     rows = db.execute(stmt.order_by(Document.uploaded_at.desc(), Document.document_id.desc()))
     return [_out(doc, event_name) for doc, event_name in rows]
 

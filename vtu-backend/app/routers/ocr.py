@@ -11,8 +11,10 @@ from app.models import Document, Event, OcrBatch, OcrBatchStatus, OcrRecord, Rol
     ValidationStatus
 from app.ocr import Extractor, get_extractor, get_ocr_session_factory
 from app.ocr.pipeline import process_batch
+from app.ocr.validation import issue_codes
 from app.permissions import not_found, require_roles
-from app.schemas import OcrBatchIn, OcrBatchOut, OcrCommitOut, OcrRecordOut, OcrRecordPatch, OcrReviewIn
+from app.schemas import (OcrBatchIn, OcrBatchOut, OcrCommitOut, OcrConfirmValidOut, OcrRecordOut, OcrRecordPatch,
+                         OcrReviewIn)
 from app.services import ocr as svc
 from app.storage import Storage, get_storage
 
@@ -31,10 +33,17 @@ def _batch_out(db: Session, row) -> OcrBatchOut:
     counts = dict(db.execute(select(OcrRecord.validation_status, func.count())
                              .where(OcrRecord.ocr_batch_id == batch.ocr_batch_id)
                              .group_by(OcrRecord.validation_status)).all())
+    issues: dict[str, int] = {}
+    for message in db.scalars(select(OcrRecord.validation_message)
+                              .where(OcrRecord.ocr_batch_id == batch.ocr_batch_id,
+                                     OcrRecord.validation_status == ValidationStatus.EXCEPTION)):
+        for code in issue_codes(message):
+            issues[code] = issues.get(code, 0) + 1
     fields = {f: getattr(batch, f) for f in OcrBatchOut.model_fields
-              if f not in ("file_name", "event_id", "event_name", "record_counts")}
+              if f not in ("file_name", "event_id", "event_name", "record_counts", "issue_counts")}
     return OcrBatchOut(**fields, file_name=file_name, event_id=event_id, event_name=event_name,
-                       record_counts={s.value: counts.get(s.value, 0) for s in ValidationStatus})
+                       record_counts={s.value: counts.get(s.value, 0) for s in ValidationStatus},
+                       issue_counts=dict(sorted(issues.items())))
 
 
 def _load_batch(db: Session, batch_id: int) -> OcrBatchOut:
@@ -51,8 +60,9 @@ def _record_rows():
 
 def _record_out(row) -> OcrRecordOut:
     record, student_name = row
-    fields = {f: getattr(record, f) for f in OcrRecordOut.model_fields if f != "matched_student_name"}
-    return OcrRecordOut(**fields, matched_student_name=student_name)
+    fields = {f: getattr(record, f) for f in OcrRecordOut.model_fields if f not in ("matched_student_name", "issues")}
+    return OcrRecordOut(**fields, matched_student_name=student_name,
+                        issues=issue_codes(record.validation_message) if record.validation_message else [])
 
 
 def _load_record(db: Session, record_id: int) -> OcrRecordOut:
@@ -113,6 +123,27 @@ def retry_batch(batch_id: int, request: Request, background: BackgroundTasks,
         batch = svc.retry_batch(db, user, batch_id, request)
     _schedule(background, batch, sessions, extractor, storage)
     return _load_batch(db, batch.ocr_batch_id)
+
+
+@router.post("/batches/{batch_id}/mark-failed", response_model=OcrBatchOut)
+def mark_failed(batch_id: int, request: Request, user: UserAccount = Depends(dean), db: Session = Depends(get_db)):
+    """Recovery for a batch stuck in QUEUED or PROCESSING (its background run was lost, e.g. the API restarted).
+    Allowed only after OCR_STALE_MINUTES without progress; 409 before that. The batch becomes FAILED with no records
+    and can then be retried (POST /ocr/batches/{id}/retry). Nothing is reprocessed automatically."""
+    with write_transaction(db):
+        svc.mark_failed(db, user, batch_id, request)
+    return _load_batch(db, batch_id)
+
+
+@router.post("/batches/{batch_id}/confirm-valid", response_model=OcrConfirmValidOut)
+def confirm_valid(batch_id: int, request: Request, body: OcrReviewIn | None = None,
+                  user: UserAccount = Depends(dean), db: Session = Depends(get_db)):
+    """Confirm every record that is VALID (after re-validation) in one step. EXCEPTION records are left for
+    individual review. Confirmation is not an award: only POST /ocr/batches/{id}/commit writes the ledger."""
+    with write_transaction(db):
+        confirmed = svc.confirm_valid(db, user, batch_id, body.comment if body else None, request)
+    ids = [r.ocr_record_id for r in confirmed]
+    return OcrConfirmValidOut(batch=_load_batch(db, batch_id), records_confirmed=len(ids), confirmed_record_ids=ids)
 
 
 @router.post("/batches/{batch_id}/commit", response_model=OcrCommitOut)

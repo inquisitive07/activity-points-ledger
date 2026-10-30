@@ -123,3 +123,25 @@ Tests use a separate `<db>_test` database, never your real data: `docker compose
 - Out-of-scope document IDs return 404, exactly like unknown IDs. Soft-deleted documents are visible to the Dean only.
 - A document cannot be deleted while it backs an award, a pending/approved/resolved request, or a non-FAILED OCR
   batch. Uploads, evidence links, archive and delete are audited (no file contents or storage keys in the log).
+
+## CP4/CP5 — OCR review and the ledger commit (summary)
+    POST /ocr/batches {document_id} -> 202 QUEUED; GET /ocr/batches[/{id}[/records]]; POST /ocr/batches/{id}/retry
+    PATCH /ocr/records/{id}; POST /ocr/records/{id}/confirm|dismiss|reopen; POST /ocr/batches/{id}/commit
+Dean only. OCR output is staged in `ocr_batch` / `ocr_record`; only the commit writes `point_ledger`, all or nothing.
+
+## CP6 — Frontend integration
+Full frontend-facing reference: **`API_INTEGRATION.md`** (auth flow, errors, endpoints per screen, examples).
+
+    POST /students/{usn}/status          DEAN {student_status, reason?}: ACTIVE | GRADUATED | INACTIVE | ARCHIVED (audited)
+    GET  /audit?action=&entity_type=&entity_id=&user_email=&limit=&offset=   DEAN, paginated
+    GET  /documents?usn=                 narrows the caller's vault to one student (HOD inspection view)
+    POST /ocr/batches/{id}/confirm-valid confirm every currently VALID record in one step (never an award)
+    POST /ocr/batches/{id}/mark-failed   recover a QUEUED/PROCESSING batch after OCR_STALE_MINUTES; then retry
+    RequestOut.document_count, OcrRecordOut.issues, OcrBatchOut.issue_counts   new response fields
+- CORS: `CORS_ORIGINS` (comma-separated exact origins; `*` refused), methods GET/POST/PATCH, headers
+  Authorization/Content-Type, no credentials (the JWT is a header, not a cookie).
+- Eligibility: only ACTIVE students submit new requests. Awarding is not limited by student status on either path:
+  individual approvals already allowed it, and bulk commits now follow the same rule (a non-ACTIVE student's OCR
+  row is flagged `STUDENT_NOT_ACTIVE` so the Dean confirms it individually).
+- Stalled OCR: a batch whose background run was lost can be marked FAILED (no records exist for it) and retried; a
+  run that finishes late is discarded, so recovery cannot duplicate records or awards.

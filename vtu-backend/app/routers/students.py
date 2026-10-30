@@ -1,12 +1,13 @@
 """Student directory and point summary. Scope is enforced in the query (app/permissions.py), not in the frontend."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.db import get_db, write_transaction
 from app.models import Event, PointLedger, Role, Student, UserAccount, student_point_summary as sps
 from app.permissions import not_found, require_roles, student_scope
-from app.schemas import LedgerRowOut, StudentDetailOut, StudentSummaryOut
+from app.schemas import LedgerRowOut, StudentDetailOut, StudentStatusIn, StudentSummaryOut
+from app.services import students as svc
 
 router = APIRouter(prefix="/students", tags=["students"])
 readers = require_roles(Role.DEAN, Role.HOD, Role.STUDENT)
@@ -47,3 +48,13 @@ def student_detail(usn: str, user: UserAccount = Depends(readers), db: Session =
         ledger=[LedgerRowOut(ledger_id=l.ledger_id, event_id=l.event_id, event_name=name,
                              points_awarded=l.points_awarded, award_date=l.award_date, source_type=l.source_type,
                              status=l.status, supersedes_ledger_id=l.supersedes_ledger_id) for l, name in ledger])
+
+
+@router.post("/{usn}/status", response_model=StudentSummaryOut)
+def change_status(usn: str, body: StudentStatusIn, request: Request,
+                  user: UserAccount = Depends(require_roles(Role.DEAN)), db: Session = Depends(get_db)):
+    """Dean only: set ACTIVE, GRADUATED, INACTIVE or ARCHIVED. Only ACTIVE students may submit new requests; every
+    status keeps login, read access, open requests and awards. Nothing is deleted."""
+    with write_transaction(db):
+        student = svc.change_status(db, user, usn, body.student_status, body.reason, request)
+    return summary_out(db.execute(summaries(user).where(Student.usn == student.usn)).one())
