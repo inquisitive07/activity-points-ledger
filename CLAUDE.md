@@ -2337,6 +2337,38 @@ APPROVED, REJECTED, RESOLVED, WITHDRAWN are terminal.
 -   Points must be non-negative (Section 5). No other point range is
     imposed.
 
+**Request submission eligibility (approved 2026-10-30)**
+
+These rules decide who may *create* a new request. They are product
+decisions, not source requirements. The source documents list the
+`student_status` values (`ACTIVE`, `GRADUATED`, `INACTIVE`, `ARCHIVED`)
+and the event statuses, but define no submission rule for them, and
+they never define `INACTIVE` at all.
+
+-   Student status is an allow-list: only `ACTIVE` students may submit
+    new requests of any type (`NEW_ACTIVITY`, `MISSING_FROM_LIST`,
+    `CORRECTION`). `GRADUATED`, `INACTIVE` and `ARCHIVED` students get
+    HTTP 403. A status added in future is refused until a decision is
+    made.
+    -   Source-defined: `GRADUATED` students are kept, and their records
+        remain available for historical/audit purposes (4.10). `ARCHIVED`
+        "can be used if the institution chooses to archive old batches"
+        (source document).
+    -   Approved decision, not from the source: blocking `INACTIVE`
+        students. To claim for past activity, the Dean first sets the
+        student back to `ACTIVE`.
+-   Event status: students may submit for `PUBLISHED` and `COMPLETED`
+    events (claims after an event has finished are allowed). `CLOSED`
+    events stay visible to students but take no new requests. `DRAFT`
+    events are invisible to students. Visibility and submission
+    eligibility are separate checks.
+-   These rules apply only to creating requests. They do not affect:
+    -   login, which depends only on `USER_ACCOUNT.account_status`;
+    -   read access to the student's historical records;
+    -   requests that already exist, which stay reviewable and
+        withdrawable according to the state machine, even after the
+        student's or the event's status changes.
+
 **Other approved rules**
 
 -   Club issue counts (4.5) follow the source document: the open club

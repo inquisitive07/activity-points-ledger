@@ -5,13 +5,20 @@ entity_id is BIGINT NOT NULL with no FK. Entities without a numeric key (user_ac
 sentinel 0 and are identified by user_email / the JSON values instead, as scripts/rvce_correction.py already does.
 """
 import ipaddress
+from decimal import Decimal
 
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
 
 NO_ENTITY_ID = 0
+
+
+def snapshot(row, *fields: str) -> dict:
+    """JSON-safe {field: value} for old_values/new_values. Points are written as 2-decimal strings ("10.00")."""
+    return jsonable_encoder({f: getattr(row, f) for f in fields}, custom_encoder={Decimal: lambda d: f"{d:.2f}"})
 
 
 def client_ip(request: Request | None) -> str | None:

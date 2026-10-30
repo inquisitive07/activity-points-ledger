@@ -84,11 +84,21 @@ Next: step 2 — auth (bcrypt + JWT) and role/department scoping.
 
     docker compose run --rm --no-deps api pytest -q tests     # uses vtu_ledger_test only
 
-## Step 3 — Events, claims, approval workflow (pre-rebuild; being ported in CP2, not mounted)
-    GET/POST /events          POST = club lead only (own club)
-    GET  /clubs, /clubs/accountability (Dean matrix)
-    POST /requests            student submits NEW_ACTIVITY / MISSING_FROM_LIST / CORRECTION
-    GET  /requests?status=    students: own · club leads: own club's events · Dean: all
-    POST /requests/{id}/club-review   {action: VERIFY|REJECT, comment}   (comment mandatory on reject)
-    POST /requests/{id}/dean-review   {action: APPROVE|REJECT, comment}  (approve writes POINT_LEDGER; correction supersedes old row)
+## CP2 — Events and the point request workflow
+    GET   /events?status=&academic_year=&club_id=   STUDENT: published (non-DRAFT) · CLUB_LEAD: own club · DEAN/HOD: all
+    GET   /events/{id}
+    POST  /events                       CLUB_LEAD (own club) or DEAN (non-club); created as DRAFT
+    PATCH /events/{id}                  owner only, while DRAFT or PUBLISHED
+    POST  /events/{id}/status           {event_status}: DRAFT -> PUBLISHED -> COMPLETED -> CLOSED, one step
+    GET   /clubs                        any signed-in user
+    GET   /clubs/accountability         DEAN; MISSING_FROM_LIST and CORRECTION requests only
+    POST  /requests                     STUDENT; club event -> PENDING_CLUB, non-club -> PENDING_DEAN
+    GET   /requests?status=&request_type=&event_id=, GET /requests/{id}   scoped by role
+    POST  /requests/{id}/withdraw       the requesting student, while pending
+    POST  /requests/{id}/club-review    CLUB_LEAD of the event's club {action: VERIFY|REJECT, comment}
+    POST  /requests/{id}/dean-review    DEAN {action: APPROVE|REJECT, comment}; APPROVE writes POINT_LEDGER
+New requests: PUBLISHED and COMPLETED events only (CLOSED is view-only; open requests on it stay reviewable);
+Only ACTIVE students may submit (GRADUATED, INACTIVE, ARCHIVED: 403) but all keep read access. Rejections need a comment. RESOLVED is set only by the signed-list (OCR) workflow. Approval locks the request
+(and, for corrections, the corrected award) and commits request, award and audit rows in one transaction.
+
 Tests use a separate `<db>_test` database, never your real data: `docker compose exec api pytest -q tests`

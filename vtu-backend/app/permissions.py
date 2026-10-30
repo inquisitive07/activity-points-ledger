@@ -5,16 +5,17 @@ outside the caller's reach behave exactly like IDs that do not exist (404, never
 conditions, so filtering happens in PostgreSQL rather than after loading rows.
 
     STUDENT    own student record, own requests/awards, documents they uploaded or that back their requests/awards
-    CLUB_LEAD  own club's events, and requests/awards/documents attached to those events; no student directory
+    CLUB_LEAD  own club's events (all statuses), and requests/awards/documents attached to those events; no student directory
     HOD        students of their own department and everything attached to those students; read-only
     DEAN       everything
 """
 from fastapi import Depends, HTTPException
 from sqlalchemy import ColumnElement, and_, exists, false, or_, true
+from sqlalchemy.orm import aliased
 
 from app.deps import get_current_user
-from app.models import (Document, DocumentStatus, Event, PointLedger, PointLedgerDocument, PointRequest,
-                        PointRequestDocument, Role, Student, UserAccount)
+from app.models import (Document, DocumentStatus, Event, EventStatus, PointLedger, PointLedgerDocument,
+                        PointRequest, PointRequestDocument, Role, Student, UserAccount)
 
 
 def require_roles(*roles: Role):
@@ -53,17 +54,32 @@ def _usn_in_scope(usn_column, user: UserAccount) -> ColumnElement[bool]:
     if user.role == Role.STUDENT:
         return usn_column == user.student_usn
     if user.role == Role.HOD:
-        return exists().where(Student.usn == usn_column, Student.department_code == user.department_code)
+        s = aliased(Student)        # aliased so it never correlates with a Student the outer query already joins
+        return exists().where(s.usn == usn_column, s.department_code == user.department_code)
     return false()
 
 
 def _event_of_own_club(event_column, user: UserAccount) -> ColumnElement[bool]:
     if user.role != Role.CLUB_LEAD:
         return false()
-    return exists().where(Event.event_id == event_column, Event.club_id == user.club_id)
+    e = aliased(Event)              # see _usn_in_scope
+    return exists().where(e.event_id == event_column, e.club_id == user.club_id)
 
 
 # --- events -----------------------------------------------------------------------------------------------------
+
+def event_scope(user: UserAccount) -> ColumnElement[bool]:
+    """Condition on Event. Students see every event that has been published (PUBLISHED, COMPLETED, CLOSED): a
+    MISSING_FROM_LIST or CORRECTION request is about an event that is already over. Drafts stay with their owner."""
+    match user.role:
+        case Role.DEAN | Role.HOD:
+            return true()
+        case Role.CLUB_LEAD:
+            return Event.club_id == user.club_id
+        case Role.STUDENT:
+            return Event.event_status != EventStatus.DRAFT
+    return false()
+
 
 def can_manage_event(user: UserAccount, event: Event) -> bool:
     """Club leads manage their own club's events; the Dean manages non-club events (club_id NULL)."""
@@ -103,7 +119,8 @@ def document_scope(user: UserAccount) -> ColumnElement[bool]:
     if user.role == Role.STUDENT:
         own = Document.uploaded_by == user.email
     elif user.role == Role.HOD:
-        own = exists().where(UserAccount.email == Document.uploaded_by, _usn_in_scope(UserAccount.student_usn, user))
+        uploader = aliased(UserAccount)
+        own = exists().where(uploader.email == Document.uploaded_by, _usn_in_scope(uploader.student_usn, user))
     elif user.role == Role.CLUB_LEAD:
         own = _event_of_own_club(Document.event_id, user)
     else:

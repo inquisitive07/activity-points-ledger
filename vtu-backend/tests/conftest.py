@@ -16,9 +16,6 @@ from app.config import settings
 from db_safety import (UnsafeTestDatabase, check_connected_database, check_head, check_server, check_test_url,
                        derive_test_url)
 
-# Written against the old UUID schema; rewritten with the CP2 request workflow. Skipped until then.
-collect_ignore = ["test_workflow.py"]
-
 ROOT = Path(__file__).resolve().parent.parent
 
 # 1. Work out the test database from the configured one and refuse anything that is not the Docker server.
