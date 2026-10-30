@@ -31,7 +31,10 @@ def main():
     t1 = time.perf_counter()
     ocr = PaddleOCR(text_detection_model_name="PP-OCRv5_mobile_det",
                     text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-                    use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)
+                    use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False,
+                    # PaddlePaddle 3.3's oneDNN (MKL-DNN) CPU backend fails on these models with
+                    # "ConvertPirAttribute2RuntimeAttribute not support"; the plain CPU path works.
+                    enable_mkldnn=False)
     t2 = time.perf_counter()
     with tempfile.TemporaryDirectory() as d:
         img = Path(d) / "sample.png"
