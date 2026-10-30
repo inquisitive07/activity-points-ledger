@@ -30,3 +30,12 @@ Next: step 2 — auth (bcrypt + JWT) and role/department scoping.
     GET  /auth/me      (Bearer token)
     GET  /students, GET /students/{usn}   (scoped by role)
     docker compose exec api pytest -q tests
+
+## Step 3 — Events, claims, approval workflow (done)
+    GET/POST /events          POST = club lead only (own club)
+    GET  /clubs, /clubs/accountability (Dean matrix)
+    POST /requests            student submits NEW_ACTIVITY / MISSING_FROM_LIST / CORRECTION
+    GET  /requests?status=    students: own · club leads: own club's events · Dean: all
+    POST /requests/{id}/club-review   {action: VERIFY|REJECT, comment}   (comment mandatory on reject)
+    POST /requests/{id}/dean-review   {action: APPROVE|REJECT, comment}  (approve writes POINT_LEDGER; correction supersedes old row)
+Tests use a separate `<db>_test` database, never your real data: `docker compose exec api pytest -q tests`
