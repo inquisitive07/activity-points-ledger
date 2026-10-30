@@ -5,8 +5,8 @@ import { Loading } from './components/ui.jsx';
 import Login from './pages/Login.jsx';
 import { StudentHome, StudentEvents, Claims, Vault } from './pages/Student.jsx';
 import { ClubDashboard, ClubEvents, ClubQueue } from './pages/Club.jsx';
-// StudentImport (pages/Dean.jsx) is kept for a later phase but not routed: student import is seed-only for the MVP.
-import { AuditReports } from './pages/Dean.jsx';
+// No Student Import screen: student import is seed-only for the MVP (CLAUDE.md 18.5) and has no backend endpoint.
+import DeanAudit from './pages/DeanAudit.jsx';
 import DeanOcr from './pages/DeanOcr.jsx';
 import DeanClaims from './pages/DeanClaims.jsx';
 import DeanStudents from './pages/DeanStudents.jsx';
@@ -44,7 +44,7 @@ export default function App() {
       <Route path="/dean/students" element={<Guard role="DEAN"><DeanStudents /></Guard>} />
       <Route path="/dean/events" element={<Guard role="DEAN"><DeanEvents /></Guard>} />
       <Route path="/dean/clubs" element={<Guard role="DEAN"><DeanClubs /></Guard>} />
-      <Route path="/dean/audit" element={<Guard role="DEAN"><AuditReports /></Guard>} />
+      <Route path="/dean/audit" element={<Guard role="DEAN"><DeanAudit /></Guard>} />
       <Route path="/hod" element={<Guard role="HOD"><Hod /></Guard>} />
       <Route path="*" element={<Navigate to={home || '/login'} replace />} />
     </Routes>

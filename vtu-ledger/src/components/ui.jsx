@@ -26,8 +26,6 @@ export const STATUS_TONE = {
   VALID: 'ok', EXCEPTION: 'err', CONFIRMED: 'ok', DISMISSED: 'mute',
   // students and accounts
   GRADUATED: 'info', INACTIVE: 'warn', DISABLED: 'err',
-  // mock-only values used by screens not yet connected to the API
-  Official: 'ok', Evidence: 'soft',
 };
 
 /** Status pill. `s` is a backend value ('PENDING_CLUB') or display text; the label is readable either way. */
