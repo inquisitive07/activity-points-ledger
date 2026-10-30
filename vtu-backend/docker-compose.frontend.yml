@@ -1,0 +1,31 @@
+# Isolated API for manual frontend integration testing (React dev server on http://localhost:5173).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.frontend.yml up -d --no-deps api-frontend
+#   docker compose -f docker-compose.yml -f docker-compose.frontend.yml exec api-frontend python scripts/seed_frontend.py
+#   curl http://localhost:8002/health
+#
+# Uses the existing `db` server but its own database (vtu_ledger_frontend, created once by hand; see README.md), its
+# own storage volume and its own .env.frontend (separate JWT secret). It never reads .env, so it cannot reach
+# vtu_ledger. `--no-deps` leaves the running db and api containers untouched.
+services:
+  api-frontend:
+    image: vtu-backend-api          # the image built for `api`; no separate build
+    pull_policy: never
+    platform: linux/amd64
+    env_file: .env.frontend
+    environment:
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+    depends_on:
+      db: { condition: service_healthy }
+    ports: ["8002:8000"]
+    volumes:
+      - ./app:/srv/app
+      - ./alembic.ini:/srv/alembic.ini
+      - ./alembic:/srv/alembic
+      - ./scripts:/srv/scripts
+      - storage_frontend:/srv/storage     # uploaded files for the frontend environment only
+      - paddle_models:/root/.paddlex      # shared OCR model cache (downloaded models, no user data)
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  storage_frontend:

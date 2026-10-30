@@ -145,3 +145,19 @@ Full frontend-facing reference: **`API_INTEGRATION.md`** (auth flow, errors, end
   row is flagged `STUDENT_NOT_ACTIVE` so the Dean confirms it individually).
 - Stalled OCR: a batch whose background run was lost can be marked FAILED (no records exist for it) and retried; a
   run that finishes late is discarded, so recovery cannot duplicate records or awards.
+
+## Frontend integration environment (port 8002)
+An isolated API for manual testing of the React app. It shares the `db` server but uses its **own database
+`vtu_ledger_frontend`**, its own storage volume (`storage_frontend`) and its own `.env.frontend` (separate JWT secret,
+so tokens from port 8001 are rejected). It never reads `.env` and never touches `vtu_ledger`.
+
+    cp .env.frontend.example .env.frontend      # then set a long random JWT_SECRET
+    docker compose exec db psql -U vtu -d postgres -c "CREATE DATABASE vtu_ledger_frontend"     # once
+    docker compose -f docker-compose.yml -f docker-compose.frontend.yml up -d --no-deps api-frontend
+    docker compose -f docker-compose.yml -f docker-compose.frontend.yml exec api-frontend python scripts/seed_frontend.py
+    curl http://localhost:8002/health
+
+`scripts/seed_frontend.py` refuses to run unless both `DATABASE_URL` and `SELECT current_database()` name
+`vtu_ledger_frontend`. Use `--no-deps` so the running `db`/`api` containers are not recreated. Plain
+`docker compose ...` commands without `-f docker-compose.frontend.yml` report `api-frontend` as an orphan; that is
+harmless (do not pass `--remove-orphans` unless you mean to remove it). Never use `down -v`.

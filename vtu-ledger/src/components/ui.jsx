@@ -1,14 +1,56 @@
-import { Paperclip, X } from 'lucide-react';
+import { AlertTriangle, Loader2, Paperclip, X } from 'lucide-react';
+import { statusLabel } from '../utils/format.js';
 
 export const BTN = 'px-3 py-1.5 rounded-lg bg-brand hover:bg-brandl text-white font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 export const GHOST = 'px-3 py-1.5 rounded-lg border border-brand text-brand hover:bg-soft/30 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 export const INPUT = 'w-full border border-soft rounded-lg px-2.5 py-1.5 bg-white text-ink text-sm focus:outline-none focus:ring-2 focus:ring-info';
 
 const TONE = { ok: 'bg-emerald-100 text-ok', warn: 'bg-amber-100 text-amber-800', info: 'bg-blue-100 text-blue-800', err: 'bg-red-100 text-brandl', mute: 'bg-gray-100 text-mute', soft: 'bg-soft text-maroon' };
-const STATUS_TONE = { ACTIVE: 'ok', CORRECTION: 'info', SUPERSEDED: 'mute', APPROVED: 'ok', REJECTED: 'err', PENDING_CLUB: 'warn', PENDING_DEAN: 'info', Official: 'ok', Evidence: 'soft', open: 'err', resolved: 'ok', dismissed: 'mute' };
 
+/**
+ * Badge colour for every backend status value (app/models.py enums). The same value means the same thing in every
+ * domain where it appears (e.g. ACTIVE for students, accounts, documents and ledger rows), so one map serves all.
+ */
+export const STATUS_TONE = {
+  // ledger rows
+  ACTIVE: 'ok', SUPERSEDED: 'mute', REVOKED: 'err',
+  // point requests
+  PENDING_CLUB: 'warn', PENDING_DEAN: 'info', APPROVED: 'ok', REJECTED: 'err', RESOLVED: 'ok', WITHDRAWN: 'mute',
+  CORRECTION: 'info',
+  // events
+  DRAFT: 'mute', PUBLISHED: 'info', COMPLETED: 'ok', CLOSED: 'mute',
+  // documents
+  ARCHIVED: 'mute', DELETED: 'err',
+  // OCR batches and records
+  QUEUED: 'mute', PROCESSING: 'info', REVIEW: 'warn', COMMITTED: 'ok', FAILED: 'err',
+  VALID: 'ok', EXCEPTION: 'err', CONFIRMED: 'ok', DISMISSED: 'mute',
+  // students and accounts
+  GRADUATED: 'info', INACTIVE: 'warn', DISABLED: 'err',
+  // mock-only values used by screens not yet connected to the API
+  Official: 'ok', Evidence: 'soft', open: 'err', resolved: 'ok', dismissed: 'mute',
+};
+
+/** Status pill. `s` is a backend value ('PENDING_CLUB') or display text; the label is readable either way. */
 export const Badge = ({ s, tone }) => (
-  <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold ${TONE[tone || STATUS_TONE[s] || 'soft']}`}>{String(s).replace('_', ' ')}</span>
+  <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${TONE[tone || STATUS_TONE[s] || 'soft']}`}>{statusLabel(s)}</span>
+);
+
+export const Loading = ({ label = 'Loading…' }) => (
+  <div role="status" className="flex items-center gap-2 text-mute text-sm py-6 justify-center">
+    <Loader2 size={16} className="animate-spin" /> {label}
+  </div>
+);
+
+/** Inline error panel for a failed load; shows the backend's message and an optional retry. */
+export const ErrorState = ({ error, title = 'Could not load this page', onRetry }) => (
+  <div role="alert" className="bg-white border border-red-200 rounded-xl p-4 mb-4 flex items-start gap-3">
+    <AlertTriangle size={18} className="text-brandl shrink-0 mt-0.5" />
+    <div className="flex-1 min-w-0">
+      <div className="font-semibold text-brandl text-sm">{title}</div>
+      <div className="text-sm text-ink break-words">{error?.message || String(error)}</div>
+    </div>
+    {onRetry && <button type="button" className={GHOST} onClick={onRetry}>Retry</button>}
+  </div>
 );
 export const Page = ({ title, sub, children }) => (
   <div className="p-4 md:p-6 max-w-6xl">

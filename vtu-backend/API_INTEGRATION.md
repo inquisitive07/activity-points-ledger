@@ -8,6 +8,7 @@ interactive OpenAPI reference is at `http://localhost:8001/docs` (JSON at `/open
 | | |
 |---|---|
 | Base URL (development) | `http://localhost:8001` (the `api` container; see `README.md`) |
+| Base URL (frontend integration) | `http://localhost:8002` (`api-frontend`, database `vtu_ledger_frontend`; see `README.md`). The React app uses this via `VITE_API_BASE_URL` |
 | Format | JSON in and out, except uploads (`multipart/form-data`) and file downloads (the file's bytes) |
 | Points | Decimal **strings** with two places: `"10.00"`. Send numbers or strings; never use floats for totals |
 | Times | ISO 8601 UTC (`"2026-03-18T12:00:00Z"`); dates `"2026-03-18"`; times `"10:00:00"` |

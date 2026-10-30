@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { useApp } from '../context/AppContext.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 import { Page, Card, Field, Table, row, BTN, GHOST, INPUT } from '../components/ui.jsx';
+import { statusLabel } from '../utils/format.js';
 
 export function ClubEvents() {
-  const { user, events, setEvents, log, toast } = useApp();
+  const { events, setEvents, log, toast } = useApp();
+  const { user } = useAuth();
   const blank = { name: '', date: '', venue: '', url: '', pts: '' };
   const [f, setF] = useState(blank);
   const [error, setError] = useState('');
@@ -11,11 +14,11 @@ export function ClubEvents() {
   const submit = (e) => {
     e.preventDefault();
     if (!f.name || !f.date || !f.venue || !(+f.pts > 0)) return setError('Title, date, venue and points are required.');
-    setEvents((v) => [...v, { id: 100 + v.length, club: user.club, ...f, pts: +f.pts }]);
+    setEvents((v) => [...v, { id: 100 + v.length, club: user.club_name, ...f, pts: +f.pts }]);
     log('PUBLISH_EVENT', f.name); toast('Event published'); setF(blank); setError('');
   };
   return (
-    <Page title={`${user.club} — Events`} sub="Publish events with standard points.">
+    <Page title={`${user.club_name} — Events`} sub="Publish events with standard points.">
       <Card title="Publish event">
         <form onSubmit={submit} className="grid md:grid-cols-3 gap-3">
           <Field label="Title"><input className={INPUT} value={f.name} onChange={set('name')} /></Field>
@@ -28,16 +31,17 @@ export function ClubEvents() {
         </form>
       </Card>
       <Card title="Published events">
-        <Table cols={['Event', 'Date', 'Venue', 'Registration', 'Points']} rows={events.filter((e) => e.club === user.club).map((e) => row(e.id, [e.name, e.date, e.venue, e.url || '—', e.pts]))} />
+        <Table cols={['Event', 'Date', 'Venue', 'Registration', 'Points']} rows={events.filter((e) => e.club === user.club_name).map((e) => row(e.id, [e.name, e.date, e.venue, e.url || '—', e.pts]))} />
       </Card>
     </Page>
   );
 }
 
 export function ClubQueue() {
-  const { user, requests, setRequests, events, eventName, log, toast } = useApp();
+  const { requests, setRequests, events, eventName, log, toast } = useApp();
+  const { user } = useAuth();
   const [comments, setComments] = useState({});
-  const queue = requests.filter((r) => r.st === 'PENDING_CLUB' && events.find((e) => e.id === r.ev)?.club === user.club);
+  const queue = requests.filter((r) => r.st === 'PENDING_CLUB' && events.find((e) => e.id === r.ev)?.club === user.club_name);
   const act = (r, st, fallback) => {
     setRequests((x) => x.map((y) => (y.id === r.id ? { ...y, st, cm: comments[r.id] || fallback } : y)));
     log(st === 'REJECTED' ? 'CLUB_REJECT' : 'CLUB_VERIFY', `REQUEST #${r.id}`);
@@ -47,7 +51,7 @@ export function ClubQueue() {
     <Page title="Verification Queue" sub="Verify claims for your events, then forward to the Dean. Rejections need a comment.">
       <Card>
         <Table cols={['ID', 'Student', 'Event', 'Type', 'Pts', 'Reviewer comment', 'Action']} empty="Queue is clear."
-          rows={queue.map((r) => row(r.id, [`#${r.id}`, r.usn, eventName(r.ev), r.type, r.pts,
+          rows={queue.map((r) => row(r.id, [`#${r.id}`, r.usn, eventName(r.ev), statusLabel(r.type), r.pts,
             <input className={INPUT} placeholder="Comment" value={comments[r.id] || ''} onChange={(e) => setComments({ ...comments, [r.id]: e.target.value })} />,
             <div className="flex gap-1">
               <button className={BTN} onClick={() => act(r, 'PENDING_DEAN', 'Verified by club.')}>Verify & forward</button>

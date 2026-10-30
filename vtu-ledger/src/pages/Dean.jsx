@@ -3,6 +3,7 @@ import { Lock } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
 import { earned, need, today, CLUBS, OCR_EXCEPTIONS, POINT_REQUIREMENT } from '../data/mock.js';
 import { Page, Card, Field, Stat, Badge, Table, row, BTN, GHOST, INPUT } from '../components/ui.jsx';
+import { statusLabel } from '../utils/format.js';
 
 /* ---------- OCR verification pipeline ---------- */
 export function OcrPipeline() {
@@ -96,7 +97,7 @@ export function ClaimApprovals() {
     <Page title="Individual Claim Approval" sub="Approval writes an ACTIVE row to the point ledger.">
       <Card>
         <Table cols={['ID', 'Student', 'Event', 'Type', 'Pts', 'Club note', 'Comment', 'Action']} empty="No claims awaiting the Dean."
-          rows={queue.map((r) => row(r.id, [`#${r.id}`, r.usn, eventName(r.ev), r.type, r.pts, r.cm || '—',
+          rows={queue.map((r) => row(r.id, [`#${r.id}`, r.usn, eventName(r.ev), statusLabel(r.type), r.pts, r.cm || '—',
             <input className={INPUT} placeholder="Comment (needed to reject)" value={comments[r.id] || ''} onChange={(e) => setComments({ ...comments, [r.id]: e.target.value })} />,
             <div className="flex gap-1"><button className={BTN} onClick={() => approve(r)}>Approve</button><button className={GHOST} disabled={!(comments[r.id] || '').trim()} onClick={() => reject(r)}>Reject</button></div>]))} />
       </Card>
