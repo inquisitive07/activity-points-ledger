@@ -164,6 +164,29 @@ def dean_review(db: Session, user: UserAccount, request_id: int, action: str, co
     return req
 
 
+def resolve_missing_from_list(db: Session, user: UserAccount, usn: str, event_id: int, *, ledger_id: int,
+                              ocr_batch_id: int, request: Request | None = None) -> list[PointRequest]:
+    """Mark the student's open MISSING_FROM_LIST requests for this event RESOLVED, because a committed signed list
+    (OCR batch) has just awarded them. Called only from the bulk ledger commit, inside its transaction. NEW_ACTIVITY
+    and CORRECTION requests are left for separate review. There is no column linking a request to a BULK_APPROVAL
+    award (its source_request_id must be NULL), so the link is recorded in the audit entry."""
+    _require(user, Role.DEAN, "resolve requests through a signed list")
+    reqs = db.scalars(select(PointRequest).where(PointRequest.usn == usn, PointRequest.event_id == event_id,
+                                                 PointRequest.request_type == RequestType.MISSING_FROM_LIST,
+                                                 PointRequest.status.in_(OPEN))
+                      .order_by(PointRequest.request_id).with_for_update()).all()
+    for req in reqs:
+        old = snapshot(req, *REVIEW_FIELDS)
+        _move(req, S.RESOLVED)
+        req.dean_decided_by, req.dean_decided_at = user.email, _now()
+        req.dean_decision_comment = f"Resolved by the committed signed list (OCR batch {ocr_batch_id})"
+        db.flush()
+        audit(db, user.email, "REQUEST_RESOLVED", "point_request", req.request_id, old_values=old,
+              new_values={**snapshot(req, *REVIEW_FIELDS), "ledger_id": ledger_id, "ocr_batch_id": ocr_batch_id},
+              request=request)
+    return reqs
+
+
 def _award(db: Session, user: UserAccount, req: PointRequest, request: Request | None) -> PointLedger:
     """Write the official award for an approved request (inside the caller's transaction)."""
     if req.claimed_points is None:

@@ -1,4 +1,4 @@
-"""CP4: OCR batches, extraction, matching, validation and Dean review.
+"""CP4 + CP5: OCR batches, extraction, matching, validation, Dean review, and the ledger commit.
 
 Uses a deterministic fake extractor (no PaddleOCR model is imported or downloaded) and runs background processing in
 the `db` fixture's transaction, so nothing persists. Files go to the temporary test storage. Seed facts come from
@@ -617,7 +617,8 @@ def test_non_dean_roles_are_refused_everywhere(api, as_, db, email):
     h = as_(email)
     calls = [("post", "/ocr/batches", {"document_id": doc}), ("get", "/ocr/batches", None),
              ("get", f"/ocr/batches/{bid}", None), ("get", f"/ocr/batches/{bid}/records", None),
-             ("post", f"/ocr/batches/{bid}/retry", None), ("patch", f"/ocr/records/{rid}", {"extracted_name": "X"}),
+             ("post", f"/ocr/batches/{bid}/retry", None), ("post", f"/ocr/batches/{bid}/commit", None),
+             ("patch", f"/ocr/records/{rid}", {"extracted_name": "X"}),
              ("post", f"/ocr/records/{rid}/confirm", None), ("post", f"/ocr/records/{rid}/dismiss", None),
              ("post", f"/ocr/records/{rid}/reopen", None)]
     count = db.scalar(select(func.count(OcrBatch.ocr_batch_id)))
@@ -677,3 +678,511 @@ def test_ocr_never_awards_points_or_changes_requests(api, as_, db, fake):
                      .where(PointLedger.source_ocr_batch_id == b["ocr_batch_id"])) == 0
     assert db.scalar(select(func.count(AuditLog.audit_id))
                      .where(AuditLog.entity_type == "point_ledger")) == ledger_audits
+
+
+# ===================================================================================================================
+# CP5: committing Dean-confirmed records to the ledger
+# ===================================================================================================================
+
+import threading                                                    # noqa: E402
+import time                                                         # noqa: E402
+
+from fastapi import HTTPException                                   # noqa: E402
+from sqlalchemy.orm import Session                                  # noqa: E402
+
+from app.db import write_transaction                                # noqa: E402
+from app.models import PointLedgerDocument, Student, UserAccount, student_point_summary  # noqa: E402
+from app.services import ocr as ocr_svc                             # noqa: E402
+
+ROBO_TITLE = "RoboWars 2026 - Robotics Club - Activity Points List"
+
+
+def reviewed(api, as_, db, fake, rows, event=CLOUD, title=None, dismiss=()) -> tuple[dict, list[dict]]:
+    """Process a list and review every record: confirm all except the USNs in `dismiss`."""
+    fake.rows, fake.title = rows, title or (ROBO_TITLE if event == ROBOWARS else CLOUD_TITLE)
+    b, recs = run(api, as_, db, event)
+    for r in recs:
+        action = "dismiss" if r["extracted_usn"] in dismiss else "confirm"
+        res = api.post(f"/ocr/records/{r['ocr_record_id']}/{action}", headers=as_(DEAN))
+        assert res.status_code == 200, res.text
+    return b, records(api, as_, b["ocr_batch_id"])
+
+
+def commit(api, as_, batch_id, expect=200) -> dict:
+    r = api.post(f"/ocr/batches/{batch_id}/commit", headers=as_(DEAN))
+    assert r.status_code == expect, r.text
+    return r.json()
+
+
+def ledger_of(db, batch_id):
+    return db.scalars(select(PointLedger).where(PointLedger.source_ocr_batch_id == batch_id)
+                      .order_by(PointLedger.ledger_id)).all()
+
+
+def request_statuses(db):
+    return dict(db.execute(select(PointRequest.request_id, PointRequest.status)).all())
+
+
+def counts(db):
+    return tuple(db.scalar(select(func.count()).select_from(t)) for t in (PointLedger, PointLedgerDocument, AuditLog))
+
+
+def test_commit_awards_every_confirmed_record(api, as_, db, fake):
+    b, recs = reviewed(api, as_, db, fake, good_rows() + [row("1RV22CS999", "Unknown", number=4)],
+                       dismiss={"1RV22CS999"})
+    bid, doc = b["ocr_batch_id"], b["document_id"]
+    out = commit(api, as_, bid)
+    assert (out["awards_created"], out["records_confirmed"], out["records_dismissed"]) == (3, 3, 1)
+    assert out["requests_resolved"] == 0 and out["resolved_request_ids"] == []
+    assert out["batch"]["status"] == "COMMITTED"
+    assert out["batch"]["record_counts"] == {"VALID": 0, "EXCEPTION": 0, "CONFIRMED": 3, "DISMISSED": 1}
+    assert out["batch"]["extracted_metadata"] == b["extracted_metadata"]       # preserved
+    assert records(api, as_, bid) == recs                                       # records preserved
+
+    awards = ledger_of(db, bid)
+    assert [a.ledger_id for a in awards] == out["ledger_ids"]
+    assert {(a.usn, a.points_awarded) for a in awards} == {(NEHA, Decimal("10.00")), (ISHITA, Decimal("10.00")),
+                                                           (KARTHIK, Decimal("7.50"))}
+    cloud = event_id(db, CLOUD)
+    for a in awards:
+        assert (a.source_type, a.source_ocr_batch_id, a.source_request_id) == ("BULK_APPROVAL", bid, None)
+        assert (a.event_id, a.status, a.approved_by, a.supersedes_ledger_id) == (cloud, "ACTIVE", DEAN, None)
+        assert a.approved_at is not None and a.award_date is not None
+        links = db.scalars(select(PointLedgerDocument).where(PointLedgerDocument.ledger_id == a.ledger_id)).all()
+        assert [(l.document_id, l.linked_by) for l in links] == [(doc, DEAN)]
+    assert "1RV22CS999" not in {a.usn for a in awards}                          # dismissed: no award
+
+    created = audits(db, "LEDGER_AWARD_CREATED")
+    mine = [e for e in created if e.entity_id in out["ledger_ids"]]
+    assert len(mine) == 3 and all(e.user_email == DEAN and e.entity_type == "point_ledger" for e in mine)
+    assert all(e.new_values["source_ocr_batch_id"] == bid and e.new_values["document_ids"] == [doc] for e in mine)
+    entry = audits(db, "OCR_BATCH_COMMITTED", bid)
+    assert len(entry) == 1 and entry[0].old_values == {"status": "REVIEW"}
+    assert entry[0].new_values["status"] == "COMMITTED" and entry[0].new_values["ledger_ids"] == out["ledger_ids"]
+
+
+def test_commit_resolves_missing_from_list_requests(api, as_, db, fake):
+    # Seed: Ishita has a PENDING_DEAN MISSING_FROM_LIST request for RoboWars.
+    req = db.scalar(select(PointRequest).where(PointRequest.usn == ISHITA, PointRequest.request_type ==
+                                               "MISSING_FROM_LIST"))
+    assert req.status == "PENDING_DEAN"
+    before = request_statuses(db)
+    b, _ = reviewed(api, as_, db, fake, [row(ISHITA, "Ishita Rao"), row(NEHA, "Neha Patil")], event=ROBOWARS)
+    out = commit(api, as_, b["ocr_batch_id"])
+    assert out["resolved_request_ids"] == [req.request_id] and out["requests_resolved"] == 1
+    db.refresh(req)
+    assert (req.status, req.dean_decided_by) == ("RESOLVED", DEAN)
+    assert f"OCR batch {b['ocr_batch_id']}" in req.dean_decision_comment
+    after = request_statuses(db)
+    assert {k: v for k, v in after.items() if k != req.request_id} == \
+        {k: v for k, v in before.items() if k != req.request_id}                 # nothing else changed
+    entry = audits(db, "REQUEST_RESOLVED", req.request_id)
+    ishita_award = next(a for a in ledger_of(db, b["ocr_batch_id"]) if a.usn == ISHITA)
+    assert len(entry) == 1 and entry[0].old_values["status"] == "PENDING_DEAN"
+    assert entry[0].new_values["status"] == "RESOLVED" and entry[0].new_values["ledger_id"] == ishita_award.ledger_id
+    # The request API shows the resolution.
+    r = api.get(f"/requests/{req.request_id}", headers=as_(DEAN))
+    assert r.json()["status"] == "RESOLVED"
+
+
+def test_commit_resolves_pending_club_missing_from_list(api, as_, db, fake):
+    # Seed: Aarav has a PENDING_CLUB MISSING_FROM_LIST request for HackRVCE and no HackRVCE award.
+    req = db.scalar(select(PointRequest).where(PointRequest.usn == AARAV_USN,
+                                               PointRequest.request_type == "MISSING_FROM_LIST"))
+    assert req.status == "PENDING_CLUB"
+    b, _ = reviewed(api, as_, db, fake, [row(AARAV_USN, "Aarav Sharma", "15")], event="HackRVCE 24h",
+                    title="HackRVCE 24h - Coding Club - Activity Points List")
+    assert commit(api, as_, b["ocr_batch_id"])["resolved_request_ids"] == [req.request_id]
+    db.refresh(req)
+    assert req.status == "RESOLVED" and req.club_reviewed_by is None
+
+
+def test_commit_leaves_new_activity_and_correction_requests_alone(api, as_, db, fake):
+    robowars = event_id(db, ROBOWARS)
+    committed_batch = db.scalar(select(OcrBatch.ocr_batch_id).where(OcrBatch.status == "COMMITTED"))
+    # Karthik: an earlier RoboWars award was revoked; his CORRECTION of it is still pending. Neha: a pending
+    # NEW_ACTIVITY request for RoboWars.
+    revoked = PointLedger(usn=KARTHIK, event_id=robowars, points_awarded=Decimal(5), award_date=func.current_date(),
+                          source_type="BULK_APPROVAL", source_ocr_batch_id=committed_batch, approved_by=DEAN,
+                          approved_at=func.now(), status="REVOKED")
+    db.add(revoked)
+    db.flush()
+    correction = PointRequest(usn=KARTHIK, event_id=robowars, request_type="CORRECTION", claimed_points=Decimal(10),
+                              reason="Should be 10", submitted_by="student5@vtu.edu.in",
+                              correction_of_ledger_id=revoked.ledger_id, status="PENDING_DEAN")
+    new_activity = PointRequest(usn=NEHA, event_id=robowars, request_type="NEW_ACTIVITY",
+                                claimed_points=Decimal(10), reason="Took part", submitted_by="student4@vtu.edu.in",
+                                status="PENDING_CLUB")
+    db.add_all([correction, new_activity])
+    db.commit()
+    b, _ = reviewed(api, as_, db, fake, [row(KARTHIK, "Karthik Bhat"), row(NEHA, "Neha Patil")], event=ROBOWARS)
+    out = commit(api, as_, b["ocr_batch_id"])
+    assert out["awards_created"] == 2 and out["requests_resolved"] == 0
+    db.refresh(correction), db.refresh(new_activity)
+    assert (correction.status, new_activity.status) == ("PENDING_DEAN", "PENDING_CLUB")
+    assert correction.dean_decided_by is None and new_activity.dean_decided_by is None
+
+
+def test_student_summary_and_view_reflect_the_new_awards(api, as_, db, fake):
+    def view(usn):
+        return db.execute(select(student_point_summary).where(student_point_summary.c.usn == usn)).one()
+
+    before_api = api.get(f"/students/{KARTHIK}", headers=as_(DEAN)).json()
+    before_view = view(KARTHIK)
+    b, _ = reviewed(api, as_, db, fake, good_rows())
+    commit(api, as_, b["ocr_batch_id"])
+    after_api = api.get(f"/students/{KARTHIK}", headers=as_(DEAN)).json()
+    assert Decimal(after_api["earned_points"]) - Decimal(before_api["earned_points"]) == Decimal("7.50")
+    assert Decimal(after_api["remaining_points"]) == Decimal(before_api["remaining_points"]) - Decimal("7.50")
+    assert [(l["event_name"], l["source_type"]) for l in after_api["ledger"]][-1] == (CLOUD, "BULK_APPROVAL")
+    after_view = view(KARTHIK)
+    assert after_view.earned_points - before_view.earned_points == Decimal("7.50")
+    assert after_view.remaining_points == max(after_view.required_points - after_view.earned_points, 0)
+    # The student sees it too (their own record).
+    assert Decimal(api.get(f"/students/{KARTHIK}", headers=as_("student5@vtu.edu.in")).json()["earned_points"]) \
+        == Decimal(after_api["earned_points"])
+
+
+def refused(api, as_, db, batch_id, status, phrase):
+    """A refused commit changes nothing at all."""
+    before, reqs = counts(db), request_statuses(db)
+    r = api.post(f"/ocr/batches/{batch_id}/commit", headers=as_(DEAN))
+    assert r.status_code == status, r.text
+    assert phrase in r.json()["detail"], r.json()["detail"]
+    assert counts(db) == before and request_statuses(db) == reqs
+    assert batch(api, as_, batch_id)["status"] == "REVIEW" and ledger_of(db, batch_id) == []
+
+
+def test_refused_while_a_valid_record_remains(api, as_, db, fake):
+    fake.rows = good_rows()
+    b, recs = run(api, as_, db)
+    for r in recs[:2]:
+        api.post(f"/ocr/records/{r['ocr_record_id']}/confirm", headers=as_(DEAN))
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"1 record(s) have not been reviewed (still VALID or EXCEPTION: "
+                                                  f"{recs[2]['ocr_record_id']})")
+
+
+def test_refused_while_an_exception_record_remains(api, as_, db, fake):
+    fake.rows = [row(NEHA, "Neha Patil"), row("1RV22CS999", "Unknown")]
+    b, recs = run(api, as_, db)
+    api.post(f"/ocr/records/{by_usn(recs, NEHA)['ocr_record_id']}/confirm", headers=as_(DEAN))
+    assert by_usn(records(api, as_, b["ocr_batch_id"]), "1RV22CS999")["validation_status"] == "EXCEPTION"
+    refused(api, as_, db, b["ocr_batch_id"], 409, "have not been reviewed")
+
+
+def test_refused_without_confirmed_records(api, as_, db, fake):
+    b, _ = reviewed(api, as_, db, fake, good_rows(), dismiss={NEHA, ISHITA, KARTHIK})
+    refused(api, as_, db, b["ocr_batch_id"], 422, "No record is CONFIRMED")
+
+
+@pytest.mark.parametrize("action, status", [("archive", "ARCHIVED")])
+def test_refused_when_the_document_is_not_active(api, as_, db, fake, action, status):
+    b, _ = reviewed(api, as_, db, fake, good_rows())
+    assert api.post(f"/documents/{b['document_id']}/{action}", headers=as_(DEAN)).status_code == 200
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"The signed list is {status}")
+
+
+def test_refused_when_the_document_has_no_event(api, as_, db, fake):
+    fake.rows = [row(NEHA, "Neha Patil")]
+    b, recs = run(api, as_, db, event=None)
+    api.post(f"/ocr/records/{recs[0]['ocr_record_id']}/dismiss", headers=as_(DEAN))
+    refused(api, as_, db, b["ocr_batch_id"], 422, "not tagged to an event")
+
+
+def tamper(db, record_id, **values):
+    """Change a confirmed record behind the API's back, to prove the commit re-checks everything."""
+    db.execute(OcrRecord.__table__.update().where(OcrRecord.ocr_record_id == record_id).values(**values))
+    db.commit()
+
+
+def test_refused_when_a_confirmed_record_has_no_matched_student(api, as_, db, fake):
+    b, recs = reviewed(api, as_, db, fake, good_rows())
+    tamper(db, recs[1]["ocr_record_id"], matched_student_usn=None)
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"record {recs[1]['ocr_record_id']} has no matched student")
+
+
+@pytest.mark.parametrize("points, phrase", [(None, "has no points"), (Decimal("-5"), "is not a valid points value")])
+def test_refused_when_a_confirmed_record_has_invalid_points(api, as_, db, fake, points, phrase):
+    b, recs = reviewed(api, as_, db, fake, good_rows())
+    tamper(db, recs[2]["ocr_record_id"], extracted_points=points)
+    refused(api, as_, db, b["ocr_batch_id"], 409, phrase)
+
+
+def test_refused_when_a_student_is_confirmed_twice(api, as_, db, fake):
+    b, recs = reviewed(api, as_, db, fake, good_rows())
+    tamper(db, recs[1]["ocr_record_id"], matched_student_usn=NEHA)
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"{NEHA} is also confirmed in record {recs[0]['ocr_record_id']}")
+
+
+def test_refused_when_an_active_award_appeared_after_confirmation(api, as_, db, fake):
+    b, _ = reviewed(api, as_, db, fake, [row(ISHITA, "Ishita Rao"), row(NEHA, "Neha Patil")], event=ROBOWARS)
+    committed_batch = db.scalar(select(OcrBatch.ocr_batch_id).where(OcrBatch.status == "COMMITTED"))
+    db.add(PointLedger(usn=NEHA, event_id=event_id(db, ROBOWARS), points_awarded=Decimal(10),
+                       award_date=func.current_date(), source_type="BULK_APPROVAL",
+                       source_ocr_batch_id=committed_batch, approved_by=DEAN, approved_at=func.now(), status="ACTIVE"))
+    db.commit()
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"{NEHA} already has an ACTIVE award for 'RoboWars 2026'")
+    # Ishita's MISSING_FROM_LIST request was not resolved either (checked by refused()).
+
+
+@pytest.mark.parametrize("status", ["GRADUATED", "INACTIVE", "ARCHIVED"])
+def test_student_eligibility_is_rechecked_at_commit(api, as_, db, fake, status):
+    b, _ = reviewed(api, as_, db, fake, good_rows())
+    db.execute(Student.__table__.update().where(Student.usn == KARTHIK).values(student_status=status))
+    db.commit()
+    refused(api, as_, db, b["ocr_batch_id"], 409, f"{KARTHIK} is {status}; only ACTIVE students can receive awards")
+
+
+def test_refused_for_a_draft_event(api, as_, db, fake):
+    b, _ = reviewed(api, as_, db, fake, good_rows())
+    db.execute(Event.__table__.update().where(Event.event_name == CLOUD).values(event_status="DRAFT"))
+    db.commit()
+    refused(api, as_, db, b["ocr_batch_id"], 409, "still a DRAFT event")
+
+
+def test_a_signed_list_is_committed_only_once(api, as_, db, fake):
+    doc = signed_list(api, as_, db)
+    fake.rows = [row(NEHA, "Neha Patil")]
+    first = start(api, as_, doc)["ocr_batch_id"]
+    fake.rows = [row(ISHITA, "Ishita Rao")]
+    second = start(api, as_, doc)["ocr_batch_id"]
+    for bid in (first, second):
+        api.post(f"/ocr/records/{records(api, as_, bid)[0]['ocr_record_id']}/confirm", headers=as_(DEAN))
+    commit(api, as_, first)
+    refused(api, as_, db, second, 409, f"already committed through batch {first}")
+
+
+def test_repeated_commit_is_refused_and_changes_nothing(api, as_, db, fake):
+    b, _ = reviewed(api, as_, db, fake, [row(ISHITA, "Ishita Rao")], event=ROBOWARS)
+    commit(api, as_, b["ocr_batch_id"])
+    before, reqs = counts(db), request_statuses(db)
+    r = api.post(f"/ocr/batches/{b['ocr_batch_id']}/commit", headers=as_(DEAN))
+    assert r.status_code == 409 and "is COMMITTED" in r.json()["detail"]
+    assert counts(db) == before and request_statuses(db) == reqs
+    assert len(ledger_of(db, b["ocr_batch_id"])) == 1
+    assert api.post("/ocr/batches/999999/commit", headers=as_(DEAN)).status_code == 404
+
+
+def test_committed_batches_are_read_only(api, as_, db, fake):
+    b, recs = reviewed(api, as_, db, fake, good_rows())
+    commit(api, as_, b["ocr_batch_id"])
+    rid = recs[0]["ocr_record_id"]
+    for method, path, body in [("patch", f"/ocr/records/{rid}", {"extracted_points": "1"}),
+                               ("post", f"/ocr/records/{rid}/confirm", None),
+                               ("post", f"/ocr/records/{rid}/dismiss", None),
+                               ("post", f"/ocr/records/{rid}/reopen", None)]:
+        r = getattr(api, method)(path, headers=as_(DEAN), json=body)
+        assert r.status_code == 409 and "is COMMITTED" in r.json()["detail"]
+    r = api.post(f"/ocr/batches/{b['ocr_batch_id']}/retry", headers=as_(DEAN))
+    assert r.status_code == 409 and "this one is COMMITTED" in r.json()["detail"]
+    assert records(api, as_, b["ocr_batch_id"]) == recs
+    r = api.post(f"/documents/{b['document_id']}/delete", headers=as_(DEAN))
+    assert r.status_code == 409                                     # evidence for awards now
+
+
+def test_service_refuses_non_dean_accounts(db):
+    for email in (AARAV, ROBOTICS, HOD):
+        with pytest.raises(HTTPException) as exc:
+            ocr_svc.commit_batch(db, db.get(UserAccount, email), 1)
+        assert exc.value.status_code == 403
+
+
+# --- separate sessions: real rollback and real concurrency ---------------------------------------------------------
+# These tests commit for real in vtu_ledger_test (through their own connections, not the rollback-only `db`
+# fixture) so other connections can see and contend for the data. They use their own event and students, and delete
+# them afterwards. The audit rows they commit cannot be deleted (audit_log is append-only); they reference only
+# these throw-away entities and disappear when the test database is dropped at the end of the session.
+
+SCENARIO_USNS = ["1RV25CS901", "1RV25CS902", "1RV25CS903"]
+
+
+@pytest.fixture
+def scenario(db_engine):
+    with Session(db_engine) as s, s.begin():
+        assert s.execute(text("SELECT current_database()")).scalar() == "vtu_ledger_test"
+        coding = s.scalar(select(Club.club_id).where(Club.club_name == "Coding Club"))
+        event = Event(event_name="CP5 Concurrency Fest", club_id=coding, event_date=func.current_date(),
+                      academic_year="2026-27", event_status="COMPLETED", created_by="coding.lead@vtu.edu.in")
+        s.add(event)
+        for i, usn in enumerate(SCENARIO_USNS):
+            s.add(Student(usn=usn, name=f"Test Student {i}", email=f"cp5.{usn.lower()}@example.invalid",
+                          department_code="CS", entry_type="REGULAR", admission_year=2025, current_semester=1,
+                          student_status="ACTIVE"))
+        s.flush()
+        doc = Document(event_id=event.event_id, document_type="SIGNED_POINT_LIST", file_name="cp5.pdf",
+                       storage_key=f"test/cp5-{event.event_id}.pdf", mime_type="application/pdf",
+                       file_size_bytes=1, file_hash="0" * 64, uploaded_by=DEAN, document_status="ACTIVE")
+        s.add(doc)
+        s.flush()
+        review = OcrBatch(document_id=doc.document_id, started_by=DEAN, status="REVIEW")
+        other = OcrBatch(document_id=doc.document_id, started_by=DEAN, status="FAILED")   # source for a rival award
+        s.add_all([review, other])
+        s.flush()
+        for i, usn in enumerate(SCENARIO_USNS, 1):
+            s.add(OcrRecord(ocr_batch_id=review.ocr_batch_id, page_number=1, row_number=i, extracted_usn=usn,
+                            matched_student_usn=usn, extracted_name=f"Test Student {i - 1}",
+                            extracted_points=Decimal(10), confidence_score=Decimal("0.99"),
+                            validation_status="CONFIRMED"))
+        request = PointRequest(usn=SCENARIO_USNS[0], event_id=event.event_id, request_type="MISSING_FROM_LIST",
+                               claimed_points=Decimal(10), reason="Missing from the list", submitted_by=AARAV,
+                               status="PENDING_DEAN")
+        s.add(request)
+        s.flush()
+        ids = {"event": event.event_id, "batch": review.ocr_batch_id, "other": other.ocr_batch_id,
+               "doc": doc.document_id, "request": request.request_id}
+    yield ids
+    with Session(db_engine) as s, s.begin():
+        ledger = select(PointLedger.ledger_id).where(PointLedger.event_id == ids["event"])
+        s.execute(PointLedgerDocument.__table__.delete().where(PointLedgerDocument.ledger_id.in_(ledger)))
+        s.execute(PointLedger.__table__.delete().where(PointLedger.event_id == ids["event"]))
+        s.execute(PointRequest.__table__.delete().where(PointRequest.event_id == ids["event"]))
+        s.execute(OcrRecord.__table__.delete().where(OcrRecord.ocr_batch_id.in_([ids["batch"], ids["other"]])))
+        s.execute(OcrBatch.__table__.delete().where(OcrBatch.document_id == ids["doc"]))
+        s.execute(Document.__table__.delete().where(Document.document_id == ids["doc"]))
+        s.execute(Event.__table__.delete().where(Event.event_id == ids["event"]))
+        s.execute(Student.__table__.delete().where(Student.usn.in_(SCENARIO_USNS)))
+
+
+def committed_state(engine, ids):
+    """What a fresh connection sees: awards, links, request status, batch status, audit rows for these entities."""
+    with Session(engine) as s:
+        ledger_ids = s.scalars(select(PointLedger.ledger_id).where(PointLedger.event_id == ids["event"])).all()
+        return {
+            "bulk_awards": s.scalar(select(func.count()).select_from(PointLedger)
+                                    .where(PointLedger.source_ocr_batch_id == ids["batch"])),
+            "all_awards": len(ledger_ids),
+            "links": s.scalar(select(func.count()).select_from(PointLedgerDocument)
+                              .where(PointLedgerDocument.document_id == ids["doc"])),
+            "request": s.scalar(select(PointRequest.status).where(PointRequest.request_id == ids["request"])),
+            "batch": s.scalar(select(OcrBatch.status).where(OcrBatch.ocr_batch_id == ids["batch"])),
+            "audit": s.scalar(select(func.count()).select_from(AuditLog).where(
+                ((AuditLog.entity_type == "ocr_batch") & (AuditLog.entity_id == ids["batch"]))
+                | ((AuditLog.entity_type == "point_request") & (AuditLog.entity_id == ids["request"]))
+                | ((AuditLog.entity_type == "point_ledger") & AuditLog.entity_id.in_(ledger_ids or [0])))),
+            "all_audit": s.scalar(select(func.count()).select_from(AuditLog)),
+        }
+
+
+UNTOUCHED = {"bulk_awards": 0, "all_awards": 0, "links": 0, "request": "PENDING_DEAN", "batch": "REVIEW", "audit": 0}
+
+
+def untouched(state):
+    return {k: v for k, v in state.items() if k != "all_audit"} == UNTOUCHED
+
+
+def commit_in_own_session(engine, batch_id, outcome: dict):
+    """One Dean request: its own connection and transaction, exactly like the API (write_transaction)."""
+    try:
+        with Session(engine) as s:
+            with write_transaction(s):
+                outcome["result"] = ocr_svc.commit_batch(s, s.get(UserAccount, DEAN), batch_id)
+            outcome["status"] = 200
+    except HTTPException as exc:
+        outcome["status"], outcome["detail"] = exc.status_code, exc.detail
+    except Exception as exc:                                 # surfaced by the test, never swallowed
+        outcome["status"], outcome["error"] = "error", repr(exc)
+
+
+def wait_until_blocked(engine, timeout=15.0) -> bool:
+    """True once some connection to the test database is waiting on a lock (seen from a third connection)."""
+    deadline = time.monotonic() + timeout
+    with engine.connect() as c:
+        while time.monotonic() < deadline:
+            waiting = c.execute(text("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                                     "AND wait_event_type = 'Lock'")).scalar()
+            c.commit()                                       # new snapshot of pg_stat_activity next time
+            if waiting:
+                return True
+            time.sleep(0.05)
+    return False
+
+
+def test_failure_partway_rolls_back_everything(db_engine, scenario, monkeypatch):
+    """Real transaction, real ROLLBACK: the 1st award, its link, its audit row and the resolution of student 1's
+    MISSING_FROM_LIST request are all written before the injected failure on the 2nd award's audit entry."""
+    real_audit, seen = ocr_svc.audit, []
+
+    def failing_audit(db, user_email, action, *args, **kwargs):
+        if action == "LEDGER_AWARD_CREATED":
+            seen.append(action)
+            if len(seen) == 2:
+                raise RuntimeError("simulated failure during the commit")
+        return real_audit(db, user_email, action, *args, **kwargs)
+
+    monkeypatch.setattr(ocr_svc, "audit", failing_audit)
+    before = committed_state(db_engine, scenario)
+    assert untouched(before)
+    with Session(db_engine) as s:
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            with write_transaction(s):
+                ocr_svc.commit_batch(s, s.get(UserAccount, DEAN), scenario["batch"])
+                pytest.fail("the injected failure did not happen")
+    assert len(seen) == 2                                    # it really failed part way through
+    after = committed_state(db_engine, scenario)
+    assert untouched(after) and after["all_audit"] == before["all_audit"]
+    # The same batch then commits cleanly.
+    monkeypatch.setattr(ocr_svc, "audit", real_audit)
+    outcome = {}
+    commit_in_own_session(db_engine, scenario["batch"], outcome)
+    assert outcome["status"] == 200, outcome
+    done = committed_state(db_engine, scenario)
+    assert (done["bulk_awards"], done["links"], done["request"], done["batch"]) == (3, 3, "RESOLVED", "COMMITTED")
+
+
+def test_concurrent_commits_award_once(db_engine, scenario):
+    """Two Dean requests commit the same batch at the same time on separate connections. The first holds the batch
+    lock with its awards written but not yet committed; the second is verified to be blocked on that lock, then
+    gets 409 once the first commits. Exactly one set of awards, links and audit entries exists."""
+    first = Session(db_engine)
+    try:
+        result = ocr_svc.commit_batch(first, first.get(UserAccount, DEAN), scenario["batch"])
+        assert result["awards_created"] == 3
+        outcome = {}
+        rival = threading.Thread(target=commit_in_own_session, args=(db_engine, scenario["batch"], outcome))
+        rival.start()
+        assert wait_until_blocked(db_engine), "the second commit never waited for the first one's lock"
+        assert rival.is_alive()
+        first.commit()
+    finally:
+        first.close()
+    rival.join(30)
+    assert not rival.is_alive()
+    assert outcome["status"] == 409 and "is COMMITTED" in outcome["detail"], outcome
+    state = committed_state(db_engine, scenario)
+    assert (state["bulk_awards"], state["links"], state["request"], state["batch"]) == (3, 3, "RESOLVED", "COMMITTED")
+    with Session(db_engine) as s:
+        assert s.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "OCR_BATCH_COMMITTED", AuditLog.entity_id == scenario["batch"])) == 1
+        assert s.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "REQUEST_RESOLVED", AuditLog.entity_id == scenario["request"])) == 1
+
+
+def test_award_racing_the_commit_is_caught_by_the_unique_index(db_engine, scenario):
+    """An ACTIVE award for student 2 is written by another transaction after the commit's duplicate check could see
+    it. The commit has already written student 1's award and resolved student 1's request; its insert for student 2
+    waits on the one-ACTIVE-award index, fails when the rival commits, and the whole commit rolls back (409)."""
+    rival = Session(db_engine)
+    try:
+        rival.add(PointLedger(usn=SCENARIO_USNS[1], event_id=scenario["event"], points_awarded=Decimal(5),
+                              award_date=func.current_date(), source_type="BULK_APPROVAL",
+                              source_ocr_batch_id=scenario["other"], approved_by=DEAN, approved_at=func.now(),
+                              status="ACTIVE"))
+        rival.flush()                                        # holds the index entry, not yet visible to others
+        outcome = {}
+        committer = threading.Thread(target=commit_in_own_session, args=(db_engine, scenario["batch"], outcome))
+        committer.start()
+        assert wait_until_blocked(db_engine), "the commit never waited on the rival award"
+        rival.commit()
+    finally:
+        rival.close()
+    committer.join(30)
+    assert not committer.is_alive()
+    assert outcome["status"] == 409 and "conflicts with data saved in the meantime" in outcome["detail"], outcome
+    state = committed_state(db_engine, scenario)
+    assert (state["bulk_awards"], state["all_awards"], state["links"], state["request"], state["batch"]) == \
+        (0, 1, 0, "PENDING_DEAN", "REVIEW")                  # only the rival's award exists
+    with Session(db_engine) as s:
+        assert s.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.entity_type == "ocr_batch", AuditLog.entity_id == scenario["batch"])) == 0
+        assert s.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.entity_type == "point_request", AuditLog.entity_id == scenario["request"])) == 0

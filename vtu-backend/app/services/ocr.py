@@ -3,7 +3,7 @@
 Functions flush but never commit: routers wrap them in db.write_transaction, so each change and its audit entry are
 committed together. Processing itself runs in the background (app/ocr/pipeline.py).
 
-Batch states:   QUEUED -> PROCESSING -> REVIEW | FAILED.   COMMITTED is set by the ledger commit (CP5), not here.
+Batch states:   QUEUED -> PROCESSING -> REVIEW | FAILED;  REVIEW -> COMMITTED (commit_batch, below).
   * A document can be processed again: every run is a new batch, earlier batches are never overwritten.
   * While a batch of the document is QUEUED or PROCESSING, no new batch is started for it.
   * Retry: a FAILED batch stays as it is (with its error message); retrying creates a new batch for the same
@@ -17,9 +17,10 @@ Record states (review only while the batch is in REVIEW):
 After every action the batch's open records are re-validated, because one record's change can settle or create a
 duplicate on another. Status changes caused that way are listed in the action's audit entry.
 
-Nothing here touches point_ledger or point_request.
+Only commit_batch writes to point_ledger and point_request, and only from CONFIRMED records of a fully reviewed
+batch. Extraction and review never award points.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, Request
@@ -27,12 +28,14 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.audit import audit, snapshot
-from app.models import (Document, DocumentStatus, DocumentType, Event, OcrBatch, OcrBatchStatus, OcrRecord, Role,
-                        Student, UserAccount, ValidationStatus)
+from app.models import (Document, DocumentStatus, DocumentType, Event, EventStatus, LedgerSourceType, LedgerStatus,
+                        OcrBatch, OcrBatchStatus, OcrRecord, PointLedger, PointLedgerDocument, PointRequest,
+                        RequestType, Role, Student, UserAccount, ValidationStatus)
 from app.ocr.pipeline import BATCH_FIELDS
-from app.ocr.validation import OPEN, normalize_usn, validate_records
+from app.ocr.validation import MAX_POINTS, OPEN, normalize_usn, validate_records
 from app.permissions import not_found
 from app.services import documents as docs
+from app.services import request_workflow as wf
 from app.services.request_workflow import active_award
 
 V = ValidationStatus
@@ -226,3 +229,125 @@ def reopen(db: Session, user: UserAccount, record_id: int, comment: str | None,
     others = _revalidate(db, batch, record.ocr_record_id)
     _audit_review(db, user, "OCR_RECORD_REOPENED", record, old, others, request, comment=comment)
     return record
+
+
+# --- ledger commit (CP5) ----------------------------------------------------------------------------------------
+
+def commit_batch(db: Session, user: UserAccount, batch_id: int, request: Request | None = None) -> dict:
+    """Turn a fully reviewed batch's CONFIRMED records into official BULK_APPROVAL awards (CLAUDE.md 4.1, 4.6, 12).
+
+    Runs inside the caller's write_transaction: the awards, their signed-list links, the MISSING_FROM_LIST
+    resolutions, the batch's COMMITTED status and every audit entry are committed together or not at all. Nothing
+    decided at extraction or confirmation time is trusted; every condition is checked again here, under locks.
+
+    Lock order (the same prefix as the review actions, so they serialise instead of deadlocking):
+      batch FOR UPDATE -> document FOR SHARE -> event FOR SHARE -> records FOR UPDATE -> students FOR SHARE
+      -> matching open MISSING_FROM_LIST requests FOR UPDATE (before any award is inserted, because a Dean review
+      locks a request before it writes an award) -> award inserts, which the one-ACTIVE-award index guards.
+    """
+    _require_dean(user)
+    batch = db.scalar(select(OcrBatch).where(OcrBatch.ocr_batch_id == batch_id).with_for_update())
+    if batch is None:
+        raise not_found("OCR batch")
+    if batch.status != OcrBatchStatus.REVIEW:
+        raise HTTPException(409, f"Batch {batch_id} is {batch.status}; only a batch in REVIEW can be committed")
+
+    doc = docs.get_visible(db, user, batch.document_id, lock="share")
+    if doc.document_type != DocumentType.SIGNED_POINT_LIST:
+        raise HTTPException(422, f"Only signed point lists can be committed; this document is a {doc.document_type}")
+    if doc.document_status != DocumentStatus.ACTIVE:
+        raise HTTPException(409, f"The signed list is {doc.document_status}; only an ACTIVE document can be committed")
+    if doc.event_id is None:
+        raise HTTPException(422, "The signed list is not tagged to an event, so its records cannot be awarded")
+    event = db.scalar(select(Event).where(Event.event_id == doc.event_id).with_for_update(read=True))
+    if event.event_status == EventStatus.DRAFT:
+        raise HTTPException(409, f"'{event.event_name}' is still a DRAFT event; publish it before awarding points")
+    earlier = db.scalar(select(OcrBatch.ocr_batch_id).where(OcrBatch.document_id == doc.document_id,
+                                                            OcrBatch.status == OcrBatchStatus.COMMITTED))
+    if earlier is not None:
+        raise HTTPException(409, f"This signed list was already committed through batch {earlier}")
+
+    records = list(db.scalars(select(OcrRecord).where(OcrRecord.ocr_batch_id == batch_id)
+                              .order_by(OcrRecord.page_number, OcrRecord.row_number, OcrRecord.ocr_record_id)
+                              .with_for_update()))
+    unreviewed = [r for r in records if r.validation_status in OPEN]
+    if unreviewed:
+        listed = ", ".join(str(r.ocr_record_id) for r in unreviewed[:10]) + (" ..." if len(unreviewed) > 10 else "")
+        raise HTTPException(409, f"{len(unreviewed)} record(s) have not been reviewed (still VALID or EXCEPTION: "
+                                 f"{listed}); confirm or dismiss every record before committing")
+    confirmed = [r for r in records if r.validation_status == V.CONFIRMED]
+    if not confirmed:
+        raise HTTPException(422, "No record is CONFIRMED; there is nothing to award")
+
+    usns = sorted({r.matched_student_usn for r in confirmed if r.matched_student_usn})
+    students = {s.usn: s for s in db.scalars(select(Student).where(Student.usn.in_(usns)).order_by(Student.usn)
+                                             .with_for_update(read=True))}
+    # Locked now, before any award exists (see the lock order above). The student locks also keep new requests
+    # from being submitted for these students until the commit ends (submission locks the student row).
+    db.scalars(select(PointRequest).where(
+        PointRequest.event_id == event.event_id, PointRequest.usn.in_(usns),
+        PointRequest.request_type == RequestType.MISSING_FROM_LIST, PointRequest.status.in_(wf.OPEN))
+        .order_by(PointRequest.request_id).with_for_update()).all()
+    awarded = set(db.scalars(select(PointLedger.usn).where(PointLedger.event_id == event.event_id,
+                                                           PointLedger.status == LedgerStatus.ACTIVE,
+                                                           PointLedger.usn.in_(usns))))
+    problems = _commit_problems(confirmed, students, awarded, event)
+    if problems:
+        raise HTTPException(409, "The batch cannot be committed; nothing was awarded: " + "; ".join(problems))
+
+    now, today = _now(), date.today()
+    ledger_ids, resolved = [], []
+    for r in confirmed:
+        award = PointLedger(usn=r.matched_student_usn, event_id=event.event_id, points_awarded=r.extracted_points,
+                            award_date=today, source_type=LedgerSourceType.BULK_APPROVAL, source_request_id=None,
+                            source_ocr_batch_id=batch_id, approved_by=user.email, approved_at=now,
+                            status=LedgerStatus.ACTIVE, supersedes_ledger_id=None)
+        db.add(award)
+        db.flush()                                  # a concurrent ACTIVE award fails here on the unique index
+        db.add(PointLedgerDocument(ledger_id=award.ledger_id, document_id=doc.document_id, linked_at=now,
+                                   linked_by=user.email))
+        db.flush()
+        audit(db, user.email, "LEDGER_AWARD_CREATED", "point_ledger", award.ledger_id,
+              new_values={**snapshot(award, *wf.LEDGER_FIELDS), "ocr_record_id": r.ocr_record_id,
+                          "document_ids": [doc.document_id]}, request=request)
+        ledger_ids.append(award.ledger_id)
+        resolved += wf.resolve_missing_from_list(db, user, award.usn, event.event_id, ledger_id=award.ledger_id,
+                                                 ocr_batch_id=batch_id, request=request)
+
+    result = {"awards_created": len(ledger_ids), "ledger_ids": ledger_ids,
+              "requests_resolved": len(resolved), "resolved_request_ids": [q.request_id for q in resolved],
+              "records_confirmed": len(confirmed),
+              "records_dismissed": sum(r.validation_status == V.DISMISSED for r in records)}
+    batch.status = OcrBatchStatus.COMMITTED         # records and extracted_metadata are kept as they are
+    db.flush()
+    audit(db, user.email, "OCR_BATCH_COMMITTED", "ocr_batch", batch_id,
+          old_values={"status": OcrBatchStatus.REVIEW},
+          new_values={"status": OcrBatchStatus.COMMITTED, "document_id": doc.document_id,
+                      "event_id": event.event_id, **result}, request=request)
+    return result
+
+
+def _commit_problems(confirmed: list[OcrRecord], students: dict, awarded: set, event: Event) -> list[str]:
+    """Every reason a confirmed record cannot become an award now. Any problem aborts the whole commit."""
+    problems, seen = [], {}
+    for r in confirmed:
+        label, usn = f"record {r.ocr_record_id}", r.matched_student_usn
+        if usn is None:
+            problems.append(f"{label} has no matched student")
+        elif usn not in students:
+            problems.append(f"{label}: student {usn} does not exist")
+        elif students[usn].student_status not in wf.MAY_SUBMIT:
+            problems.append(f"{label}: {usn} is {students[usn].student_status}; only ACTIVE students can receive "
+                            f"awards (set the student back to ACTIVE first)")
+        points = r.extracted_points
+        if points is None:
+            problems.append(f"{label} has no points")
+        elif points < 0 or points > MAX_POINTS:
+            problems.append(f"{label}: {points} is not a valid points value")
+        if usn is not None:
+            if usn in seen:
+                problems.append(f"{label}: {usn} is also confirmed in record {seen[usn]}")
+            seen.setdefault(usn, r.ocr_record_id)
+            if usn in awarded:
+                problems.append(f"{label}: {usn} already has an ACTIVE award for '{event.event_name}'")
+    return problems

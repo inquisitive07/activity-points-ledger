@@ -1,5 +1,6 @@
-"""OCR batches and the Dean's review of OCR records. Dean-only. Rules live in app/services/ocr.py, processing in
-app/ocr/pipeline.py. Nothing reachable from here writes to point_ledger or point_request.
+"""OCR batches, the Dean's review of OCR records, and the ledger commit. Dean-only. Rules live in
+app/services/ocr.py, processing in app/ocr/pipeline.py. Only POST /ocr/batches/{id}/commit writes to point_ledger
+and point_request, and only from the CONFIRMED records of a fully reviewed batch.
 """
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy import func, select
@@ -11,7 +12,7 @@ from app.models import Document, Event, OcrBatch, OcrBatchStatus, OcrRecord, Rol
 from app.ocr import Extractor, get_extractor, get_ocr_session_factory
 from app.ocr.pipeline import process_batch
 from app.permissions import not_found, require_roles
-from app.schemas import OcrBatchIn, OcrBatchOut, OcrRecordOut, OcrRecordPatch, OcrReviewIn
+from app.schemas import OcrBatchIn, OcrBatchOut, OcrCommitOut, OcrRecordOut, OcrRecordPatch, OcrReviewIn
 from app.services import ocr as svc
 from app.storage import Storage, get_storage
 
@@ -112,6 +113,15 @@ def retry_batch(batch_id: int, request: Request, background: BackgroundTasks,
         batch = svc.retry_batch(db, user, batch_id, request)
     _schedule(background, batch, sessions, extractor, storage)
     return _load_batch(db, batch.ocr_batch_id)
+
+
+@router.post("/batches/{batch_id}/commit", response_model=OcrCommitOut)
+def commit_batch(batch_id: int, request: Request, user: UserAccount = Depends(dean), db: Session = Depends(get_db)):
+    """Award every CONFIRMED record of a fully reviewed batch (all or nothing), resolve the matching open
+    MISSING_FROM_LIST requests, and mark the batch COMMITTED. A repeated or concurrent commit gets 409."""
+    with write_transaction(db):
+        result = svc.commit_batch(db, user, batch_id, request)
+    return OcrCommitOut(batch=_load_batch(db, batch_id), **result)
 
 
 @router.patch("/records/{record_id}", response_model=OcrRecordOut)

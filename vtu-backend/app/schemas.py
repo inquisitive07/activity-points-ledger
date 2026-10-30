@@ -353,3 +353,14 @@ class OcrReviewIn(BaseModel):
     @classmethod
     def strip(cls, v):
         return _clean(v)
+
+
+class OcrCommitOut(BaseModel):
+    """Result of committing a batch to the ledger."""
+    batch: OcrBatchOut
+    awards_created: int
+    ledger_ids: list[int]
+    requests_resolved: int
+    resolved_request_ids: list[int]
+    records_confirmed: int
+    records_dismissed: int
